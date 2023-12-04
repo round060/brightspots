@@ -190,7 +190,7 @@ ggplot() +
   labs(title = "YOY electrofishing",
        subtitle = "160 Lakes, 13 Bright Spots, 4 Dark spots",
        x = "Longitude", y = "Latitude", color = "Spots") 
-ggsave("./figures/recruitment_brightspots.jpeg")
+#ggsave("./figures/recruitment_brightspots.jpeg")
 ```
 
 # Overlap
@@ -223,6 +223,6 @@ ggplot() +
   labs(title = "Sychrony between gillnet and\n recruitment brightspots",
        subtitle = "155 Lakes, 109 Yes, 46 No",
        x = "Longitude", y = "Latitude", color = "Sychrony\nbetween spots") 
-ggsave("./figures/synchrony.jpeg")
+#ggsave("./figures/synchrony.jpeg")
 ```
 

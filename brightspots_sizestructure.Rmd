@@ -9,7 +9,6 @@ output: html_document
 library(tidyverse)
 library(mnsentinellakes)
 library(arrow)
-library(brms)
 library(lme4)
 library(sf)
 library(mgcv)
@@ -21,7 +20,7 @@ mn_data <- open_dataset("./data/mn_file_arrow/")
 suitable_surveys <- read.csv("./data/clean_data/wae_abundance.csv")# %>% 
 gn_lakes <- unique(suitable_surveys$lake_id)
 
-source("rf_functions.r")
+
 # Need to fix some NHD IDs
 ```
 
@@ -33,20 +32,20 @@ source("rf_functions.r")
 walleye_nocatch <- mn_data %>% 
   filter(effort_ident %in% suitable_surveys$effort_ident) %>% 
   collect() %>%
-  group_by(effort_ident, lake_id, date_clean, lake_name.1) %>%
+  group_by(effort_ident, lake_id, nhdhr.id, date_clean, lake_name.1) %>%
   mutate(count = sum(species.1 == 'walleye')) %>% 
   #surveys that did not catch fish (species column is na) return a catch of 0
   mutate(count = case_when(is.na(species.1) ~ 0,
                            TRUE ~ count)) %>%
   filter(count == 0) %>%
-  distinct(effort_ident, lake_id, date_clean, lake_name.1, total_effort_1.1, count)
+  distinct(effort_ident, lake_id, nhdhr.id, date_clean, lake_name.1, total_effort_1.1, count)
 walleye_nocatch$n_over500 = 0
 walleye_nocatch$p_over500 = 0
 
 walleye_size <- mn_data %>% 
   filter(effort_ident %in% suitable_surveys$effort_ident) %>% 
   collect() %>%
-  group_by(effort_ident, lake_id, date_clean, lake_name.1, total_effort_1.1) %>%
+  group_by(effort_ident, lake_id, nhdhr.id, date_clean, lake_name.1, total_effort_1.1) %>%
   mutate(count = sum(species.1 == 'walleye')) %>% 
   #surveys that did not catch fish (species column is na) return a catch of 0
   mutate(count = case_when(is.na(species.1) ~ 0,
@@ -55,7 +54,7 @@ walleye_size <- mn_data %>%
   filter(species.1 == "walleye") %>%
   filter(!is.na(length.1)) %>%
   mutate(greater_than_500 = as.numeric(length.1 >= 500)) %>%
-  group_by(effort_ident, lake_id, date_clean, lake_name.1, total_effort_1.1, count) %>%
+  group_by(effort_ident, lake_id, date_clean, nhdhr.id, lake_name.1, total_effort_1.1, count) %>%
   summarize(n_over500 = sum(greater_than_500)) %>%
   mutate(p_over500 = n_over500/count)
 
@@ -205,6 +204,19 @@ size_ais <- merge(x = size_secchi, y = ais,
 
 ```
 
+```{r}
+missing_ids <- data.frame(
+  lake_id = c("69069400", "69060800", "38053200", "38021100", "16063300"), 
+  nhdhr.id.x = c("nhdhr_120019354", "nhdhr_80993113", 
+               "nhdhr_72d19d48-754d-459b-a1f2-b1cfd8993b06", "nhdhr_80993749", 
+               "nhdhr_120019082"))
+size_ais = size_ais %>% rows_update(y = missing_ids, by = c("lake_id")) %>%
+  relocate(lake_id, nhdhr.id.x, lake_name.1) %>%
+  rename(nhdhr.id = nhdhr.id.x) %>% dplyr::select(!c(nhdhr.id.y))
+```
+
+
+
 # temperature metrics
 ```{r}
 current_temps <- read_feather(
@@ -223,18 +235,55 @@ size_temp <- merge(size_ais, current_temps,
 gn_temp_na <- merge(size_ais, current_temps, 
                     by = c("year", "nhdhr.id"), all.x = T) %>% 
   filter(is.na(peak_temp)) %>% 
-  filter(year != 2022, !is.na(nhdhr.id)) %>% group_by(nhdhr.id) %>%
+  filter(year != 2022) %>% group_by(nhdhr.id) %>%
   count() %>% filter(n > 2)
 ```
 
+# remove random junk
 ```{r}
 rm(current_temps); rm(size_stocking); rm(size_ais); rm(mn_lakes); 
 rm(mn_gn_lakes); rm(mn_gn_lakes_clean); rm(stocking); rm(ais)
 rm(secchi); rm(missing_secchi); rm(na_secchi); rm(all_wae_size);
 rm(size_secchi); rm(secchi_temp); rm(secchi.full); rm(suitable_surveys)
-rm(walleye_nocatch); rm(walleye_size); rm(size_spatial)
+rm(walleye_nocatch); rm(walleye_size); rm(size_spatial); 
+rm(filter_secchi_temp); rm(nhd.id); rm(matching_kv_secchi)
 ```
 
+
+
+```{r}
+size_temp_clean <- size_temp %>%
+  dplyr::filter(year >= 1988) %>%
+  mutate(year_f = as.factor(year),
+         log_acres = log(acres),
+         log_shore_mi = log(shore_mi),
+         ice_off_jday = yday(ice_off_date)
+         )
+
+three.years <- size_temp_clean %>% group_by(lake_id) %>% count() %>% 
+  filter(n >= 3)
+  
+
+size_temp_train <- size_temp_clean %>%
+  dplyr::filter(lake_id %in% three.years$lake_id) %>%
+  mutate(lake_id = as.numeric(lake_id), 
+         STOCKED = as.factor(STOCKED),
+         BACI = as.factor(BACI)) %>%
+  select(c("lake_id", "lake_name.1", "x", "y","n_over500", "p_over500",
+           "year","julian_day", 
+           "log_acres", "log_shore_mi",  "STOCKED", "BACI", 
+           "median_secchi", "gdd_wtr_0c", "gdd_wtr_5c", "gdd_wtr_10c",
+           "post_ice_warm_rate", "date_over_16.7", "mean_surf_apr",
+           "mean_surf_aug", "mean_surf_jul", "mean_surf_jun", 
+           "mean_surf_may", "mean_surf_nov", "mean_surf_oct", 
+           "mean_surf_sep", "mean_surf_JulAugSep",
+           "ice_off_jday", "coef_var_1_30", "coef_var_31_60")) %>% 
+  group_by(lake_id) %>% 
+  mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE)))) %>%
+  ungroup() %>% filter(!is.na(median_secchi))
+#
+write.csv(size_temp_train, "./data/adult_size_data.csv", row.names = F)
+```
 
 
 # exploration
