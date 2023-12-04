@@ -1,0 +1,47 @@
+---
+title: "hotspots"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+```
+
+# What are the best walleye recruit lakes
+```{r}
+efish_wae <- read.csv("./data/yoy_catch_data.csv")
+
+total_ef_wae <- efish_wae %>%
+  group_by(lake_id) %>%
+  summarize(n = n(), mean_CPUE = mean(cpue), 
+            sd.CPUE = sd(cpue), 
+            lat = unique(y),
+            long = unique(x)) %>% 
+  distinct(lake_id, .keep_all = T) %>%
+  ungroup() %>%
+  slice_max(mean_CPUE, n = 19)
+  
+```
+
+
+# What are the best adult walleye catch lakes
+```{r}
+adult_wae <- read.csv("./data/adult_catch_data.csv")
+
+best_adult_walleye <- adult_wae %>%
+  group_by(lake_id, lake_name.1) %>%
+  summarize(n = n(), mean_CPUE = mean(cpue), 
+            sd.CPUE = sd(cpue)) %>%
+  #dplyr::filter(n > 2) %>%
+  filter(mean_CPUE > 0) %>%
+  ungroup() %>% 
+  slice_max(mean_CPUE, n = 71)
+
+
+```
+
+# Overlap between best recruits and catches?
+```{r}
+total_ef_wae %>% dplyr::filter(lake_id %in% best_adult_walleye$lake_id)
+```
+

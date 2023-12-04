@@ -1,0 +1,248 @@
+---
+title: "brightspots_sizestructure"
+author: "Christopher Rounds"
+date: "11/20/2023"
+output: html_document
+---
+
+```{r setup}
+library(tidyverse)
+library(mnsentinellakes)
+library(arrow)
+library(brms)
+library(lme4)
+library(sf)
+library(mgcv)
+library(rfUtilities)
+library(pdp)
+library(randomForest)
+
+mn_data <- open_dataset("./data/mn_file_arrow/") 
+suitable_surveys <- read.csv("./data/clean_data/wae_abundance.csv")# %>% 
+gn_lakes <- unique(suitable_surveys$lake_id)
+
+source("rf_functions.r")
+# Need to fix some NHD IDs
+```
+
+
+# Find suitable surveys
+## Most restrictive data so far
+```{r}
+
+walleye_nocatch <- mn_data %>% 
+  filter(effort_ident %in% suitable_surveys$effort_ident) %>% 
+  collect() %>%
+  group_by(effort_ident, lake_id, date_clean, lake_name.1) %>%
+  mutate(count = sum(species.1 == 'walleye')) %>% 
+  #surveys that did not catch fish (species column is na) return a catch of 0
+  mutate(count = case_when(is.na(species.1) ~ 0,
+                           TRUE ~ count)) %>%
+  filter(count == 0) %>%
+  distinct(effort_ident, lake_id, date_clean, lake_name.1, total_effort_1.1, count)
+walleye_nocatch$n_over500 = 0
+walleye_nocatch$p_over500 = 0
+
+walleye_size <- mn_data %>% 
+  filter(effort_ident %in% suitable_surveys$effort_ident) %>% 
+  collect() %>%
+  group_by(effort_ident, lake_id, date_clean, lake_name.1, total_effort_1.1) %>%
+  mutate(count = sum(species.1 == 'walleye')) %>% 
+  #surveys that did not catch fish (species column is na) return a catch of 0
+  mutate(count = case_when(is.na(species.1) ~ 0,
+                           TRUE ~ count)) %>%
+  filter(count > 0) %>%
+  filter(species.1 == "walleye") %>%
+  filter(!is.na(length.1)) %>%
+  mutate(greater_than_500 = as.numeric(length.1 >= 500)) %>%
+  group_by(effort_ident, lake_id, date_clean, lake_name.1, total_effort_1.1, count) %>%
+  summarize(n_over500 = sum(greater_than_500)) %>%
+  mutate(p_over500 = n_over500/count)
+
+all_wae_size <- rbind(walleye_nocatch, walleye_size) %>%
+  mutate(year = lubridate::year(date_clean),
+         julian_day = lubridate::yday(date_clean))
+```
+
+# add physical lake data to gill net sureys
+```{r}
+mn_lakes <- readRDS("./data/covariate/mndow_lakes_sf_allDataUntransformed.rds")
+sf_use_s2(FALSE) # we dont like spheres
+
+st_crs(mn_lakes) <- 26915
+mn_gn_lakes <- mn_lakes %>% dplyr::filter(dowlknum %in% gn_lakes)
+
+
+
+mn_gn_lakes <- st_as_sf(x = mn_lakes,                         
+                  coords = c("x", "y"),
+                  crs = "+proj=utm +zone=15")
+mn_gn_lakes = st_transform(mn_lakes, crs = "+proj=longlat +datum=WGS84")
+mn_gn_lakes$x <- st_coordinates(st_centroid(st_as_sf(mn_gn_lakes)))[,"X"]
+mn_gn_lakes$y <- st_coordinates(st_centroid(st_as_sf(mn_gn_lakes)))[,"Y"]
+
+mn_gn_lakes_clean <- as.data.frame(mn_gn_lakes) %>% 
+  select("dowlknum", "pw_basin_n","acres","wb_class", "shore_mi", "x", "y") %>%
+  dplyr::filter(pw_basin_n != "Mississippi River - Pepin (WI)") %>%
+  rename(lake_id = dowlknum) %>% distinct(lake_id, .keep_all = T) %>%
+  # make sure some riverish lakes stay (lake pepin, laq que parle)
+  mutate(wb_class = ifelse(lake_id == "25000100", 
+                           "semiriverine polygon", wb_class),
+         wb_class = ifelse(lake_id == "37004600", 
+                           "semiriverine polygon", wb_class),
+         wb_class = ifelse(lake_id == "62004700", 
+                           "semiriverine polygon", wb_class),
+         wb_class = ifelse(lake_id == "69129100", 
+                           "semiriverine polygon", wb_class))
+
+size_spatial <- merge(x = all_wae_size, y = mn_gn_lakes_clean, 
+                    by = "lake_id", all.x = T) %>%
+  dplyr::filter(wb_class != "Riverine polygon") %>%
+  mutate(lake_id = fixlakeid(lake_id))
+# removes river gill netting
+```
+
+```{r}
+rm()
+```
+
+
+# Add stocking data
+```{r stocking_gn}
+stocking <- read.csv("./data/covariate/mn_wae_stocking.csv") %>% 
+  rename(lake_id = DOW, year = Year) %>% mutate(lake_id = fixlakeid(lake_id))
+
+size_stocking <- merge(x = size_spatial, y = stocking, 
+                         by = c("lake_id", "year"), all.x = T) %>%
+  mutate(across(FRY:frl.pa, ~ ifelse(is.na(.), 0, .))) %>%
+  mutate(julian_day = yday(date_clean))  %>%
+  #If any are stocked make Stocked = 1
+  mutate(STOCKED =  ifelse(rowSums(across(fry.pa:frl.pa)) > 0, 1, 0))
+
+```
+
+# Add Secchi data to gill net surveys
+```{r gn_secchi}
+secchi <- read.csv("./data/covariate/MN_AnnualSecchi_update.csv") %>%
+  select(year, median_secchi, Prmnn_I) %>%
+  mutate(nhdhr.id = paste0("nhdhr_", Prmnn_I))
+
+
+nhd.id <- mwlaxeref::lake_id_xref %>% filter(state == "mn") %>%
+  mutate(local.id = fixlakeid(local.id)) %>%
+  group_by(local.id, nhdhr.id) %>% distinct(.keep_all = T) %>% ungroup()
+
+secchi.full = merge(x = secchi, y = nhd.id, 
+               by = c("nhdhr.id"), all.x = T) %>%
+  select(local.id, nhdhr.id, lagos.id, year, median_secchi) %>%
+  rename(lake_id = local.id) %>%
+  group_by(lake_id, nhdhr.id, year) %>% 
+  distinct(.keep_all = T) %>% ungroup()
+
+# add remotely sensed secchi to the gill net data
+size_secchi <- merge(x = size_stocking, y = secchi.full, 
+                   by = c("lake_id", "year"), all.x = T)
+
+# Which Secchis are we missing? (when we have 3+ years of surveys)
+na_secchi <- size_secchi %>% dplyr::filter(is.na(median_secchi)) %>%
+  group_by(lake_id) %>% count() %>% filter(n >= 3) 
+
+# select those surveys
+missing_secchi <-  size_secchi %>% dplyr::filter(is.na(median_secchi)) %>%
+  filter(year < 2019) %>%
+  filter(lake_id %in% na_secchi$lake_id) %>% dplyr::select(year, lake_id)
+
+# what surveys does Kelsey have that we are missing?
+secchi_file_list <- list.files("./data/Secchi_Predictions/")
+
+matching_kv_secchi <- missing_secchi %>% 
+  filter(missing_secchi$lake_id %in% substr(secchi_file_list, 1, 8))
+  
+# read in those observations and calculate median Secchi
+matching_kv_secchi$median_secchi <- -999
+
+for (i in 1:nrow(matching_kv_secchi)) {
+  dow <- matching_kv_secchi$lake_id[i]
+  survey_year <- matching_kv_secchi$year[i]
+  secchi_temp <- readRDS(paste0("./data/Secchi_Predictions/", dow, 
+                                "_daily_secchi.rds"))
+  filter_secchi_temp <- secchi_temp %>% 
+    filter(Year == survey_year) %>% filter(DOY > 150, DOY < 300) 
+  matching_kv_secchi$median_secchi[i] <- median(filter_secchi_temp$Fit, na.rm = T)
+}
+
+matching_kv_secchi <- matching_kv_secchi %>% distinct(lake_id, year, median_secchi) 
+
+size_secchi <- size_secchi %>% 
+  rows_update(y = matching_kv_secchi, by = c("year", "lake_id"))
+
+missing_secchi <-  size_secchi %>% filter(is.na(median_secchi)) 
+```
+
+
+# collect and add AIS data
+```{r gn_ais, warning=FALSE}
+ais <- readxl::read_excel("./data/covariate/infested-waters.xlsx") %>% 
+  dplyr::filter(ais == "zebra mussel") %>% select(!Column1) %>%
+  dplyr::filter(dow != "NA", dow != "na") %>%
+  dplyr::filter(!grepl("none", dow) ) %>%
+  mutate(lake_id = fixlakeid(dow),
+         lake_id = str_pad(lake_id, width = 8, side = "right", pad = "0")) %>%
+  dplyr::rename(year.listed = year) %>%
+  select(lake_id, year.listed, year_confirmed, ais)
+
+size_ais <- merge(x = size_secchi, y = ais, 
+                         by = "lake_id", all.x = T) %>%
+  mutate(ais = ifelse(is.na(ais), 0, 1),
+         year_confirmed = as.numeric(year_confirmed),
+         year_confirmed = ifelse(is.na(year_confirmed), NA, year_confirmed),
+         infested = ifelse(year_confirmed <= year, 1, 0),
+         BACI = ifelse(year_confirmed >= year, 1, 0),
+         BACI = ifelse(infested == 1, 2, BACI),
+         BACI = ifelse(is.na(BACI), 3, BACI),
+         BACI = ifelse(BACI == 3 & year > 2016, 4, BACI)) %>%
+  dplyr::select(!c(year.listed, ais))
+
+```
+
+# temperature metrics
+```{r}
+current_temps <- read_feather(
+  "./data/lake_temperature_metrics_GLM_NLDAS.feather") %>% 
+  dplyr::select(site_id, year, peak_temp, ice_off_date, 
+                coef_var_1_30, coef_var_31_60,
+                gdd_wtr_0c, gdd_wtr_5c, gdd_wtr_10c, contains("mean_surf"),
+                post_ice_warm_rate, contains("date_over")) %>% 
+  rename(nhdhr.id = site_id)
+
+size_temp <- merge(size_ais, current_temps, 
+                 by = c("year", "nhdhr.id"), all.x = T) %>%
+  dplyr::filter(effort_ident != 36874) %>%
+  filter(!is.na(peak_temp))
+
+gn_temp_na <- merge(size_ais, current_temps, 
+                    by = c("year", "nhdhr.id"), all.x = T) %>% 
+  filter(is.na(peak_temp)) %>% 
+  filter(year != 2022, !is.na(nhdhr.id)) %>% group_by(nhdhr.id) %>%
+  count() %>% filter(n > 2)
+```
+
+```{r}
+rm(current_temps); rm(size_stocking); rm(size_ais); rm(mn_lakes); 
+rm(mn_gn_lakes); rm(mn_gn_lakes_clean); rm(stocking); rm(ais)
+rm(secchi); rm(missing_secchi); rm(na_secchi); rm(all_wae_size);
+rm(size_secchi); rm(secchi_temp); rm(secchi.full); rm(suitable_surveys)
+rm(walleye_nocatch); rm(walleye_size); rm(size_spatial)
+```
+
+
+
+# exploration
+```{r}
+# some surveys just have no length
+effort = c("44714", "3562")
+temp <- mn_data %>%
+  filter(species.1 == "walleye") %>%
+  filter(effort_ident %in% effort) %>% collect()
+```
+

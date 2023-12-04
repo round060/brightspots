@@ -1,0 +1,122 @@
+---
+title: "stocking"
+author: "Christopher Rounds"
+date: "10/31/2023"
+output: html_document
+---
+
+```{r setup}
+library(tidyverse)
+library(mnsentinellakes)
+```
+
+# Compile all MN WAE stocking
+```{r mn}
+#stocking data
+#first set of data - from Dale, through 2014
+stock1 = read_csv("./data/stocking/wae_stock_2014.csv") %>% 
+  mutate(DOW = fixlakeid(DOW), Year = StockedYear) 
+#need to make wide so just one row per lake year
+stock.fry = stock1 %>% select(DOW, Year, LifeStageStocked, NoStocked ) %>%  
+  filter(LifeStageStocked == "FRY") %>% group_by(DOW, Year) %>%  summarise(FRY = sum(NoStocked ))
+stock.fgl = stock1 %>% select(DOW, Year, LifeStageStocked, NoStocked ) %>%  
+  filter(LifeStageStocked == "FGL") %>% group_by(DOW, Year) %>%  summarise(FGL = sum(NoStocked ))
+stock.YRL = stock1 %>% select(DOW, Year, LifeStageStocked, NoStocked ) %>%  
+  filter(LifeStageStocked == "YRL") %>% group_by(DOW, Year) %>%  summarise(YRL = sum(NoStocked ))
+stock.ADL = stock1 %>% select(DOW, Year, LifeStageStocked, NoStocked ) %>%  
+  filter(LifeStageStocked == "ADL") %>% group_by(DOW, Year) %>%  summarise(ADL = sum(NoStocked ))
+stock.FRL = stock1 %>% select(DOW, Year, LifeStageStocked, NoStocked ) %>%  
+  filter(LifeStageStocked == "FRL") %>% group_by(DOW, Year) %>%  summarise(FRL = sum(NoStocked ))
+
+stock2 = stock.fry %>% 
+  full_join(stock.fgl) %>% full_join(stock.ADL) %>% 
+  full_join(stock.YRL) %>% full_join(stock.FRL)
+
+
+#newer stocking data
+stock3 = read_csv("./data/stocking/All stocked fish.csv") %>% 
+  filter(`Water Body Type` == "Lake" & Species == "WAE" & Purpose != "REAR") %>%
+  mutate(DOW = fixlakeid(`DOW/Kittle`), Year = year(Date)) 
+
+stock.fry = stock3 %>%
+  select(DOW, Year, `Life Stage`, `Number of Fish` ) %>% filter(`Life Stage` == "FRY") %>%
+  group_by(DOW, Year) %>%  summarise(FRY = sum(`Number of Fish` ))
+stock.fgl = stock3 %>% 
+  select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  filter(`Life Stage` == "FGL") %>%
+  group_by(DOW, Year) %>%  summarise(FGL = sum(`Number of Fish` ))
+stock.YRL = stock3 %>%
+  select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  filter(`Life Stage` == "YRL") %>%
+  group_by(DOW, Year) %>%  summarise(YRL = sum(`Number of Fish` ))
+stock.ADL = stock3 %>%
+  select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  filter(`Life Stage` == "ADL") %>%
+  group_by(DOW, Year) %>%  summarise(ADL = sum(`Number of Fish` ))
+stock.FRL = stock3 %>%
+  select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  filter(`Life Stage` == "FRL") %>%
+  group_by(DOW, Year) %>%  summarise(FRL = sum(`Number of Fish` ))
+
+stock4 = stock.fry %>% full_join(stock.fgl) %>% full_join(stock.ADL) %>%
+  full_join(stock.YRL) %>% full_join(stock.FRL)
+
+test=merge(stock2, stock4, by=c("DOW", "Year"))
+test1=anti_join(stock2, stock4, by=join_by(DOW, Year))
+test2=anti_join(stock4, stock2, by=join_by(DOW, Year))
+#use Dale's if not in Paula's 
+stock5 = rbind(stock4, test1) %>% 
+  replace_na(list(FRY=0, FGL=0, ADL=0, YRL=0, FRL=0)) %>% 
+  mutate(fry.pa=case_when(FRY>0~1, TRUE~0),fgl.pa = case_when(FGL>0~1, TRUE~0),
+         adl.pa=case_when(ADL>0~1, TRUE~0),yrl.pa=case_when(YRL>0~1, TRUE~0),
+         frl.pa=case_when(FRL>0~1, TRUE~0))
+
+# recent years (2021 + 2022)
+stock2021 = read_csv("./data/stocking/2021 WAE stocking for Gretchen.csv") %>% 
+  filter(`Water Body Type`=="Lake"& Species=="WAE"&Purpose!="REAR") %>%
+  mutate(DOW=fixlakeid(`DOW/Kittle`), Year=year(Date))
+
+stock2022 = read_csv("./data/stocking/2022 WAE stocking for Gretchen.csv") %>% 
+  filter(`Water Body Type` == "Lake" & Species == "WAE" & Purpose != "REAR") %>%
+  mutate(DOW = fixlakeid(`DOW/Kittle`), Year = year(Date))
+
+stock6 = rbind(stock2021, stock2022)
+
+stock.fry = stock6 %>%
+  select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  
+  filter(`Life Stage` == "FRY") %>% 
+  group_by(DOW, Year) %>%  summarise(FRY = sum(`Number of Fish` ))
+stock.fgl = stock6 %>% select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  
+  filter(`Life Stage` == "FGL") %>% group_by(DOW, Year) %>% 
+  summarise(FGL = sum(`Number of Fish` ))
+stock.YRL = stock6 %>% select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  
+  filter(`Life Stage` == "YRL") %>% group_by(DOW, Year) %>% 
+  summarise(YRL = sum(`Number of Fish` ))
+stock.ADL = stock6 %>% select(DOW, Year, `Life Stage`, `Number of Fish` ) %>% 
+  filter(`Life Stage` == "ADL") %>% group_by(DOW, Year) %>% 
+  summarise(ADL = sum(`Number of Fish` ))
+stock.FRL = stock6 %>% select(DOW, Year, `Life Stage`, `Number of Fish` ) %>%  
+  filter(`Life Stage` == "FRL") %>% group_by(DOW, Year) %>% 
+  summarise(FRL = sum(`Number of Fish` ))
+
+stock7 = stock.fry %>% full_join(stock.fgl) %>% full_join(stock.ADL) %>% 
+  full_join(stock.YRL) %>% full_join(stock.FRL)
+
+all_mn_wae_stocking = rbind(stock5, stock7) %>% 
+  replace_na(list(FRY=0, FGL=0, ADL=0, YRL=0, FRL=0)) %>% 
+  mutate(fry.pa=case_when(FRY>0~1, TRUE~0), 
+         fgl.pa=case_when(FGL>0~1, TRUE~0), 
+         adl.pa=case_when(ADL>0~1, TRUE~0),
+         yrl.pa=case_when(YRL>0~1, TRUE~0), 
+         frl.pa=case_when(FRL>0~1, TRUE~0))
+
+write.csv(all_mn_wae_stocking, "./data/mn_wae_stocking.csv", row.names = F)
+```
+
+
+```{r}
+
+```
+
+
+```{r pressure}
+
+```
+
+

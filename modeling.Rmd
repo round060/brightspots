@@ -1,0 +1,228 @@
+---
+title: "rf_adult"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(rfUtilities)
+library(pdp)
+library(randomForest)
+library(tidyverse)
+library(lme4)
+library(partykit)
+source("rf_functions.r")
+options(scipen=999)
+
+gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
+  mutate(BACI = as.factor(BACI),
+         STOCKED = as.factor(STOCKED))
+
+gn_temp_train <- gn_temp_train[complete.cases(gn_temp_train), ]
+
+yoy_surveys <- read.csv("./data/yoy_catch_data.csv")
+
+```
+
+
+# Gill net modeling
+```{r}
+independent <- gn_temp_train %>% 
+  select(!c("lake_id", "lake_name.1", "cpue"))
+
+cor <- Hmisc::rcorr(as.matrix(independent))$r
+
+# high correlation (>.6)
+# acres-shore miles, secchi has ~.4-.5 with all temp metrics
+# practically all temp metrics
+# good temp variables post-ice-warm rate, coef_var, date_over
+
+independent <- gn_temp_train %>% 
+  select(c("lake_id","year", "julian_day", "cpue_yep","cpue_np","cpue_cisco", 
+           "log_acres", "STOCKED", "BACI", "median_secchi", 
+           "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7", 
+           "mean_surf_JulAugSep","mean_surf_may",
+           "ice_off_jday", "coef_var_1_30", "coef_var_31_60"))
+
+rf = randomForest(gn_temp_train$cpue ~ ., data = independent, ntree = 100)
+#varImpPlot(rf)
+model.pred <- predict(rf, type="response" , OOB=TRUE)
+R2 = 1 - sum((gn_temp_train$cpue-model.pred)^2)/
+  sum((gn_temp_train$cpue-mean(gn_temp_train$cpue))^2)
+
+
+#write_rds(independent, "./independent.rds") 
+
+mixed.rf.gn <- MixRF(Y = gn_temp_train$cpue , X = independent, 
+                  random = "(1|lake_id)", data = gn_temp_train, 
+                  mtry = sqrt(ncol(independent)), ntree = 1000)
+                  
+write_rds(mixed.rf.gn, "./adult.mixed.rf.rds")  
+#
+mixed.rf.gn <- readRDS("./adult.mixed.rf.rds")
+#mixed.rf.gn$forest
+#varImpPlot(mixed.rf.gn$forest)
+
+random.gn <- as.data.frame(ranef(mixed.rf.gn$MixedModel)) %>%
+  mutate(
+    spot = "Spot",
+    upper = condval + 1.96*condsd,
+    lower = condval - 1.96*condsd,
+    spot = ifelse(upper*-1 <0& lower*-1<0, "Bright Spot", spot ),
+    spot = ifelse(upper*-1 >0& lower*-1>0, "Dark Spot", spot )) %>%
+  rename(lake_id = grp) %>% select(!c("grpvar", "term"))
+#lattice::dotplot(random.gn)
+
+#partialPlot(mixed.rf.gn$forest, independent, coef_var_31_60)
+#partialPlot(mixed.rf.gn$forest, independent, mean_surf_may)
+#partialPlot(mixed.rf.gn$forest, independent, gdd_wtr_0c)
+```
+
+# Adult bright spots plots
+```{r}
+location <- gn_temp_train %>% select(lake_id, lake_name.1, x, y) %>% 
+  distinct(lake_id, .keep_all = T)
+
+bright.spots.gn <- merge(x = random.gn, y = location, 
+                         by = "lake_id", all.x = T) %>%
+  mutate(size = ifelse(spot == "Spot", T, F))
+
+mn_counties <- map_data("state", "Minnesota")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = bright.spots.gn, aes(x=x, y=y, color = spot, alpha = size, size = size)) + 
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "Gill net",
+       subtitle = "1341 Lakes, 113 Bright Spots, 44 Dark spots",
+       x = "Longitude", y = "Latitude", color = "Spots") 
+ggsave("./figures/gillnet_brightspots.jpeg")
+```
+
+
+```{r}
+rm(rf); rm(mixed.rf.gn)
+```
+
+
+# Electro fishing modeling
+```{r}
+independent <- yoy_surveys %>% 
+  select(!c("lake_id", "cpue"))
+
+cor <- Hmisc::rcorr(as.matrix(independent))$r
+
+
+independent <- yoy_surveys %>% 
+  select(c("lake_id", "year", "julian_day",
+           "log_acres", "STOCKED", "infested", "median_secchi", 
+           "peak_temp", "coef_var_1_30", "coef_var_31_60",
+           "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7",
+           "date_over_21", "ice_off_yday",
+           "mean_surf_JulAugSep","mean_surf_may"))
+
+
+mixed.rf.recruit <- MixRF(Y = yoy_surveys$cpue , X = independent, 
+                  random = "(1|lake_id)", data = yoy_surveys,
+                  mtry = sqrt(ncol(independent)), ntree = 1000)
+write_rds(mixed.rf.recruit, "./recruit.mixed.rf.rds")
+mixed.rf.recruit <- readRDS("./recruit.mixed.rf.rds")
+mixed.rf.recruit$forest
+#
+varImpPlot(mixed.rf.recruit$forest)
+
+random.yoy <- as.data.frame(ranef(mixed.rf.recruit$MixedModel)) %>%
+  mutate(
+    spot = "Spot",
+    upper = condval + 1.96*condsd,
+    lower = condval - 1.96*condsd,
+    spot = ifelse(upper*-1 <0& lower*-1<0, "Bright Spot", spot ),
+    spot = ifelse(upper*-1 >0& lower*-1>0, "Dark Spot", spot )) %>%
+  rename(lake_id = grp) %>% select(!c("grpvar", "term"))
+```
+
+# recruitment bright spots plots
+```{r}
+location.yoy <- yoy_surveys %>% select(lake_id, x, y) %>% 
+  distinct(lake_id, .keep_all = T)
+
+bright.spots.yoy <- merge(x = random.yoy, y = location.yoy, 
+                         by = "lake_id", all.x = T) %>%
+  mutate(size = ifelse(spot == "Spot", T, F))
+
+mn_counties <- map_data("state", "Minnesota")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = bright.spots.yoy, aes(x=x, y=y, color = spot, alpha = size, size = size)) + 
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "YOY electrofishing",
+       subtitle = "160 Lakes, 13 Bright Spots, 4 Dark spots",
+       x = "Longitude", y = "Latitude", color = "Spots") 
+ggsave("./figures/recruitment_brightspots.jpeg")
+```
+
+# Overlap
+```{r}
+overlap <- merge(x = bright.spots.yoy,  y = bright.spots.gn, by = c("lake_id")) %>%
+  mutate(sychrony = ifelse(spot.x == spot.y, "Yes", "No"),
+         direction = "",
+         direction = ifelse()) %>%
+  rename(yoy_spot = spot.x, gn_spot = spot.y,
+         x = x.x, y= y.x ) %>%
+  dplyr::select(lake_id, yoy_spot, gn_spot, sychrony, y, x)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = overlap, aes(x=x, y=y, color = sychrony, alpha = sychrony, size = sychrony)) + 
+  #scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) + 
+  labs(title = "Sychrony between gillnet and\n recruitment brightspots",
+       subtitle = "155 Lakes, 109 Yes, 46 No",
+       x = "Longitude", y = "Latitude", color = "Sychrony\nbetween spots") 
+ggsave("./figures/synchrony.jpeg")
+```
+
