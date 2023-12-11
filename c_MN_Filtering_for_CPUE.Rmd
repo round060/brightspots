@@ -25,14 +25,13 @@ filter_table <- read_csv("https://docs.google.com/spreadsheets/d/e/2PACX-1vSkGZi
   filter(state == "Minnesota")
 
 mn_data <- open_dataset("./data/mn_file_arrow/")
-glimpse(mn_data)
 
 ```
 
 # walleye filtering
 ```{r}
 #filters for metric (adult abundance) and selects columns needed for survey filtering
-filter_table_effort <- read_csv("Fish_CLimate_Filtering.csv") %>% 
+filter_table_effort <- read_csv("./data/Fish_Climate_Filtering.csv") %>% 
   filter(metric == "adult_abundance" & state == "Minnesota" & 
            species_1 == "walleye") %>% 
   filter(sampling_method != "Standard 3/4-in mesh, double frame trap net sets") %>%
@@ -130,7 +129,7 @@ temp_wae <- adult_walleye_cpue %>%
          lake_id = mnsentinellakes::fixlakeid(lake_id)) %>%
   dplyr::filter(year >= 1980)
   
-#write.csv(temp_yp, "./data/clean_data/yp_cpue.csv", row.names = F)
+#write.csv(temp_wae, "./data/clean_data/wae_cpue.csv", row.names = F)
 rm(adult_walleye); rm(adult_walleye_cpue)
 ```
 
@@ -771,7 +770,7 @@ adult_smallmouth_cpue %>%
 #cisco filtering
 ```{r}
 #filters for metric (adult abundance) and selects columns needed for survey filtering
-filter_table_effort <- read_csv("Fish_Climate_Filtering.csv") %>% 
+filter_table_effort <- read_csv("./data/Fish_Climate_Filtering.csv") %>% 
   filter(sampling_method != "Standard 3/4-in mesh, double frame trap net sets") %>%
   filter(metric == "adult_abundance" & state == "Minnesota" & 
            species_1 == "cisco") %>% 
@@ -868,7 +867,7 @@ rm(adult_cisco_cpue); rm(adult_cisco); rm(good_surveys)
 #northern pike filtering
 ```{r}
 #filters for metric (adult abundance) and selects columns needed for survey filtering
-filter_table_effort <- read_csv("Fish_Climate_Filtering.csv") %>% 
+filter_table_effort <- read_csv("./data/Fish_Climate_Filtering.csv") %>% 
   filter(metric == "adult_abundance" & state == "Minnesota" & species_1 == "northern_pike") %>%
   filter(sampling_method != "Standard 3/4-in mesh, double frame trap net sets") %>%
   rename(survey_type.1 = survey_type) %>% 
@@ -963,7 +962,7 @@ rm(adult_northern_pike_cpue); rm(adult_northern_pike); rm(good_surveys)
 # yellow perch filtering
 ```{r}
 #filters for metric (adult abundance) and selects columns needed for survey filtering
-filter_table_effort <- read_csv("Fish_Climate_Filtering.csv") %>% 
+filter_table_effort <- read_csv("./data/Fish_Climate_Filtering.csv") %>% 
   filter(sampling_method != "Standard 3/4-in mesh, double frame trap net sets") %>%
   filter(metric == "adult_abundance" & state == "Minnesota" & 
            species_1 == "yellow_perch") %>% 
@@ -1075,6 +1074,7 @@ temp_yp <- adult_yellow_perch_cpue %>%
   mutate(year = lubridate::year(date_clean),
          lake_id = mnsentinellakes::fixlakeid(lake_id)) %>%
   dplyr::filter(year >= 1980)
+write.csv(temp_yp, "./data/clean_data/yp_cpue.csv", row.names = F)
 rm(adult_yellow_perch_cpue); rm(adult_yellow_perch); rm(good_surveys)
 ```
 
@@ -1117,7 +1117,8 @@ combined.cisco %>%
   geom_point() +
   geom_smooth()
 
-#write.csv(combined.cisco, "./data/clean_data/wae_abundance.csv", row.names = F)
+#
+write.csv(combined.cisco, "./data/clean_data/wae_abundance.csv", row.names = F)
 ```
 
 

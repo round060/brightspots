@@ -130,13 +130,30 @@ new_surveys_ais <- merge(x = new_surveys_spatial, y = ais,
          year_confirmed = ifelse(is.na(year_confirmed), 0, year_confirmed),
          infested = as.factor(ifelse(year_confirmed >= year, 1, 0)))
 
+
+new_surveys_ais <- merge(x = new_surveys_spatial, y = ais, 
+                         by = "lake_id", all.x = T) %>%
+  mutate(ais = ifelse(is.na(ais), 0, 1),
+         year_confirmed = as.numeric(year_confirmed),
+         year_confirmed = ifelse(is.na(year_confirmed), NA, year_confirmed),
+         infested = ifelse(year_confirmed <= year, 1, 0),
+         BACI = ifelse(year_confirmed >= year, 1, 0),
+         BACI = ifelse(infested == 1, 2, BACI),
+         BACI = ifelse(is.na(BACI), 3, BACI),
+         BACI = ifelse(BACI == 3 & year > 2016, 4, BACI)) %>%
+  dplyr::select(!c(year.listed, ais))
+#BACI - 1 = infested lake before infestation
+#BACI - 2 = Infested lake post infestation
+#BACI - 3 = uninfested lake pre-pseudo year
+#BACI - 4 = uninfested lake post pseudo year
 ```
 
 
 # Get new stocking 
 ```{r}
 stocking <- read.csv("./data/covariate/mn_wae_stocking.csv") %>% 
-  dplyr::filter(Year > 2019) %>% rename(lake_id = DOW, year = Year)
+  dplyr::filter(Year > 2019) %>% rename(lake_id = DOW, year = Year) %>%
+  mutate(lake_id = ifelse(lake_id == "04003500", "04003501", lake_id))
 
 new_surveys_stocking <- merge(x = new_surveys_ais, y = stocking, 
                          by = c("lake_id", "year"), all.x = T) %>%

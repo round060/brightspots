@@ -89,16 +89,60 @@ gn_spatial <- merge(x = adult_wae, y = mn_gn_lakes_clean,
 ```
 
 # Add stocking data
+## Can I add stocking data from more years?
+## Can I make stocking data continous?
 ```{r stocking_gn}
 stocking <- read.csv("./data/covariate/mn_wae_stocking.csv") %>% 
-  rename(lake_id = DOW, year = Year) %>% mutate(lake_id = fixlakeid(lake_id))
+  rename(lake_id = DOW, year = Year) %>% mutate(lake_id = fixlakeid(lake_id)) %>%
+  mutate(lake_id = ifelse(lake_id == "04003500", "04003501", lake_id))
 
+# add current year stocking
 gn_stocking <- merge(x = gn_spatial, y = stocking, 
                          by = c("lake_id", "year"), all.x = T) %>%
   mutate(across(FRY:frl.pa, ~ ifelse(is.na(.), 0, .))) %>%
   mutate(julian_day = yday(date_clean))  %>%
   #If any are stocked make Stocked = 1
-  mutate(STOCKED =  ifelse(rowSums(across(fry.pa:frl.pa)) > 0, 1, 0))
+  mutate(STOCKED =  ifelse(rowSums(across(fry.pa:frl.pa)) > 0, 1, 0),
+         fry.pa = FRY/acres, 
+         fgl.pa = FGL/acres, 
+         adl.pa = ADL/acres, 
+         yrl.pa = YRL/acres,
+         frl.pa = FRL/acres) %>%
+  dplyr::select(-c(FRY:FRL))
+
+# add previous year stocking
+
+stocking.previous <- stocking %>% mutate(year = year + 1) %>%
+  rename_with(~ paste(., ".previous", sep = ""), FRY:frl.pa)
+
+gn_stocking <- merge(x = gn_stocking, y = stocking.previous, 
+                         by = c("lake_id", "year"), all.x = T) %>%
+  mutate(across(FRY.previous:frl.pa.previous, ~ ifelse(is.na(.), 0, .))) %>%
+  #If any are stocked make Stocked = 1
+  mutate(STOCKED.previous =  ifelse(rowSums(across(fry.pa.previous:frl.pa.previous)) > 0, 1, 0),
+         fry.pa.previous = FRY.previous/acres, 
+         fgl.pa.previous = FGL.previous/acres, 
+         adl.pa.previous = ADL.previous/acres, 
+         yrl.pa.previous = YRL.previous/acres,
+         frl.pa.previous = FRL.previous/acres) %>%
+  dplyr::select(-c(FRY.previous:FRL.previous))
+
+# add two year ago stocking
+
+stocking.2.previous <- stocking %>% mutate(year = year + 2) %>%
+  rename_with(~ paste(., ".2.previous", sep = ""), FRY:frl.pa)
+
+gn_stocking <- merge(x = gn_stocking, y = stocking.2.previous, 
+                         by = c("lake_id", "year"), all.x = T) %>%
+  mutate(across(FRY.2.previous:frl.pa.2.previous, ~ ifelse(is.na(.), 0, .))) %>%
+  #If any are stocked make Stocked = 1
+  mutate(STOCKED.2.previous =  ifelse(rowSums(across(fry.pa.2.previous:frl.pa.2.previous)) > 0, 1, 0),
+         fry.pa.2.previous = FRY.2.previous/acres, 
+         fgl.pa.2.previous = FGL.2.previous/acres, 
+         adl.pa.2.previous = ADL.2.previous/acres, 
+         yrl.pa.2.previous = YRL.2.previous/acres,
+         frl.pa.2.previous = FRL.2.previous/acres) %>%
+  dplyr::select(-c(FRY.2.previous:FRL.2.previous))
 ```
 
 # Add Secchi data to gill net surveys
@@ -172,6 +216,11 @@ ais <- readxl::read_excel("./data/covariate/infested-waters.xlsx") %>%
   dplyr::rename(year.listed = year) %>%
   select(lake_id, year.listed, year_confirmed, ais)
 
+
+#BACI - 1 = infested lake before infestation
+#BACI - 2 = Infested lake post infestation
+#BACI - 3 = uninfested lake pre-pseudo year
+#BACI - 4 = uninfested lake post pseudo year
 gn_ais <- merge(x = gn_secchi, y = ais, 
                          by = "lake_id", all.x = T) %>%
   mutate(ais = ifelse(is.na(ais), 0, 1),
@@ -183,7 +232,6 @@ gn_ais <- merge(x = gn_secchi, y = ais,
          BACI = ifelse(is.na(BACI), 3, BACI),
          BACI = ifelse(BACI == 3 & year > 2016, 4, BACI)) %>%
   dplyr::select(!c(year.listed, ais))
-
 ```
 
 # temperature metrics
@@ -211,12 +259,13 @@ gn_temp_na <- merge(gn_ais, current_temps,
 # remove unnesseccary objects
 ```{r}
 rm(current_temps); rm(gn_stocking); rm(gn_ais); rm(gn_spatial); rm(mn_lakes); 
-rm(adult_wae); rm(mn_gn_lakes); rm(mn_gn_lakes_clean); rm(stocking); rm(ais)
+rm(adult_wae); rm(mn_gn_lakes); rm(mn_gn_lakes_clean);  rm(ais)
+rm(stocking); rm(stocking.previous); rm(stocking.2.previous)
 rm(secchi); rm(missing_secchi); rm(na_secchi)
 rm(gn_secchi); rm(secchi_temp); rm(secchi.full)
 ```
 
-
+# output data
 ```{r}
 gn_temp_clean <- gn_temp %>%
   dplyr::filter(year >= 1988) %>%
@@ -237,7 +286,8 @@ gn_temp_train <- gn_temp_clean %>%
          BACI = as.factor(BACI)) %>%
   select(c("lake_id", "lake_name.1", "x", "y", "cpue",
            "year","julian_day", "cpue_yep","cpue_cisco", "cpue_np", 
-           "log_acres", "log_shore_mi",  "STOCKED", "BACI", 
+           "log_acres", "log_shore_mi",  fry.pa:STOCKED.2.previous, 
+           "BACI", 
            "median_secchi", "gdd_wtr_0c", "gdd_wtr_5c", "gdd_wtr_10c",
            "post_ice_warm_rate", "date_over_16.7", "mean_surf_apr",
            "mean_surf_aug", "mean_surf_jul", "mean_surf_jun", 

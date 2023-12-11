@@ -13,14 +13,22 @@ library(partykit)
 source("rf_functions.r")
 options(scipen=999)
 
+# gill net data
 gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
   mutate(BACI = as.factor(BACI),
          STOCKED = as.factor(STOCKED))
 
 gn_temp_train <- gn_temp_train[complete.cases(gn_temp_train), ]
 
-yoy_surveys <- read.csv("./data/yoy_catch_data.csv")
+# E-fishing YOY data
+yoy_surveys <- read.csv("./data/yoy_catch_data.csv") #%>%
+    mutate(infested = as.factor(infested),
+         STOCKED = as.factor(STOCKED))
 
+# size structure data
+size_temp_train <- read.csv("./data/adult_size_data.csv") %>% 
+  mutate(BACI = as.factor(BACI),
+         STOCKED = as.factor(STOCKED))
 ```
 
 
@@ -37,30 +45,21 @@ cor <- Hmisc::rcorr(as.matrix(independent))$r
 # good temp variables post-ice-warm rate, coef_var, date_over
 
 independent <- gn_temp_train %>% 
-  select(c("lake_id","year", "julian_day", "cpue_yep","cpue_np","cpue_cisco", 
+  select(c("year", "julian_day", "cpue_yep","cpue_np","cpue_cisco", 
            "log_acres", "STOCKED", "BACI", "median_secchi", 
            "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7", 
            "mean_surf_JulAugSep","mean_surf_may",
            "ice_off_jday", "coef_var_1_30", "coef_var_31_60"))
 
-rf = randomForest(gn_temp_train$cpue ~ ., data = independent, ntree = 100)
-#varImpPlot(rf)
-model.pred <- predict(rf, type="response" , OOB=TRUE)
-R2 = 1 - sum((gn_temp_train$cpue-model.pred)^2)/
-  sum((gn_temp_train$cpue-mean(gn_temp_train$cpue))^2)
-
-
-#write_rds(independent, "./independent.rds") 
 
 mixed.rf.gn <- MixRF(Y = gn_temp_train$cpue , X = independent, 
-                  random = "(1|lake_id)", data = gn_temp_train, 
+                  random = "(1|lake_id)", data = gn_temp_train, importance = T,
                   mtry = sqrt(ncol(independent)), ntree = 1000)
                   
-write_rds(mixed.rf.gn, "./adult.mixed.rf.rds")  
-#
-mixed.rf.gn <- readRDS("./adult.mixed.rf.rds")
+#write_rds(mixed.rf.gn, "./models/adult.mixed.rf.rds")  
+#mixed.rf.gn <- readRDS("./models/adult.mixed.rf.rds")
 #mixed.rf.gn$forest
-#varImpPlot(mixed.rf.gn$forest)
+#varImpPlot(mixed.rf.gn$forest, type = 1)
 
 random.gn <- as.data.frame(ranef(mixed.rf.gn$MixedModel)) %>%
   mutate(
@@ -70,11 +69,6 @@ random.gn <- as.data.frame(ranef(mixed.rf.gn$MixedModel)) %>%
     spot = ifelse(upper*-1 <0& lower*-1<0, "Bright Spot", spot ),
     spot = ifelse(upper*-1 >0& lower*-1>0, "Dark Spot", spot )) %>%
   rename(lake_id = grp) %>% select(!c("grpvar", "term"))
-#lattice::dotplot(random.gn)
-
-#partialPlot(mixed.rf.gn$forest, independent, coef_var_31_60)
-#partialPlot(mixed.rf.gn$forest, independent, mean_surf_may)
-#partialPlot(mixed.rf.gn$forest, independent, gdd_wtr_0c)
 ```
 
 # Adult bright spots plots
@@ -109,12 +103,51 @@ ggplot() +
         panel.grid.minor = element_blank(),
         panel.background = element_blank()) +
   labs(title = "Gill net",
-       subtitle = "1341 Lakes, 113 Bright Spots, 44 Dark spots",
+       subtitle = "1341 Lakes, 116 Bright Spots, 50 Dark spots",
        x = "Longitude", y = "Latitude", color = "Spots") 
-ggsave("./figures/gillnet_brightspots.jpeg")
+#ggsave("./figures/gillnet_brightspots.jpeg")
+```
+
+# Adult plots and messing around
+```{r}
+gn.importance <- importance(mixed.rf.gn$forest) 
+gn.importance <- cbind("variable" = rownames(gn.importance), 
+                       data.frame(gn.importance, row.names=NULL)) %>%
+  rename(increase_MSE = X.IncMSE)
+
+gn.importance %>% 
+  ggplot(aes(x=reorder(variable, increase_MSE), y = increase_MSE)) +
+  geom_point() + 
+  geom_segment(aes(x = variable, xend = variable, y=0, yend = increase_MSE)) + 
+  coord_flip() + xlab("Variable") + ylab("% increase in MSE") + ggtitle("Gill net importance") +
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12))
+  
+ggsave("./figures/gill.net.importance.jpeg")
+
+#partialPlot(mixed.rf.gn$forest, independent, BACI)
+#partialPlot(mixed.rf.gn$forest, independent, cpue_yep)
+#partialPlot(mixed.rf.gn$forest, independent, gdd_wtr_0c)
+
+gn_temp_train$predicted = predict.MixRF(mixed.rf.gn, gn_temp_train, EstimateRE = T)
+
+#fitted vs predicted
+gn_temp_train %>%
+  ggplot() + 
+  geom_point(aes(x = cpue, y = predicted)) + 
+  geom_abline (slope=1, linetype = "dashed", color="Red") + 
+  ggtitle("Gill net predicted vs fitted") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12))
+#ggsave("./figures/gill.net.predVSfit.jpeg")
 ```
 
 
+# remove big objects (Gill-net)
 ```{r}
 rm(rf); rm(mixed.rf.gn)
 ```
@@ -128,8 +161,8 @@ independent <- yoy_surveys %>%
 cor <- Hmisc::rcorr(as.matrix(independent))$r
 
 
-independent <- yoy_surveys %>% 
-  select(c("lake_id", "year", "julian_day",
+independent.yoy <- yoy_surveys %>% 
+  select(c("year", "julian_day",
            "log_acres", "STOCKED", "infested", "median_secchi", 
            "peak_temp", "coef_var_1_30", "coef_var_31_60",
            "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7",
@@ -137,14 +170,15 @@ independent <- yoy_surveys %>%
            "mean_surf_JulAugSep","mean_surf_may"))
 
 
-mixed.rf.recruit <- MixRF(Y = yoy_surveys$cpue , X = independent, 
+mixed.rf.recruit <- MixRF(Y = yoy_surveys$cpue , X = independent.yoy, 
                   random = "(1|lake_id)", data = yoy_surveys,
+                  importance = T,
                   mtry = sqrt(ncol(independent)), ntree = 1000)
-write_rds(mixed.rf.recruit, "./recruit.mixed.rf.rds")
-mixed.rf.recruit <- readRDS("./recruit.mixed.rf.rds")
-mixed.rf.recruit$forest
+#write_rds(mixed.rf.recruit, "./models/recruit.mixed.rf.rds")
 #
-varImpPlot(mixed.rf.recruit$forest)
+mixed.rf.recruit <- readRDS("./models/recruit.mixed.rf.rds")
+#mixed.rf.recruit$forest
+#varImpPlot(mixed.rf.recruit$forest)
 
 random.yoy <- as.data.frame(ranef(mixed.rf.recruit$MixedModel)) %>%
   mutate(
@@ -188,27 +222,192 @@ ggplot() +
         panel.grid.minor = element_blank(),
         panel.background = element_blank()) +
   labs(title = "YOY electrofishing",
-       subtitle = "160 Lakes, 13 Bright Spots, 4 Dark spots",
+       subtitle = "184 Lakes, 14 Bright Spots, 4 Dark spots",
        x = "Longitude", y = "Latitude", color = "Spots") 
 #ggsave("./figures/recruitment_brightspots.jpeg")
 ```
 
-# Overlap
+# YOY plots and messing around
 ```{r}
-overlap <- merge(x = bright.spots.yoy,  y = bright.spots.gn, by = c("lake_id")) %>%
-  mutate(sychrony = ifelse(spot.x == spot.y, "Yes", "No"),
-         direction = "",
-         direction = ifelse()) %>%
-  rename(yoy_spot = spot.x, gn_spot = spot.y,
-         x = x.x, y= y.x ) %>%
-  dplyr::select(lake_id, yoy_spot, gn_spot, sychrony, y, x)
+yoy.importance <- importance(mixed.rf.recruit$forest) 
+yoy.importance <- cbind("variable" = rownames(yoy.importance), 
+                       data.frame(yoy.importance, row.names=NULL)) %>%
+  rename(increase_MSE = X.IncMSE)
+
+yoy.importance %>% 
+  ggplot(aes(x=reorder(variable, increase_MSE), y = increase_MSE)) +
+  geom_point() + 
+  geom_segment(aes(x = variable, xend = variable, y=0, yend = increase_MSE)) + 
+  coord_flip() + xlab("Variable") + ylab("% increase in MSE") + 
+  ggtitle("YOY electrofishing importance") +
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12))
+ggsave("./figures/recruitment.importance.jpeg")
+
+#partialPlot(mixed.rf.recruit, independent, BACI)
+#partialPlot(mixed.rf.recruit, independent, cpue_yep)
+#partialPlot(mixed.rf.recruit, independent, gdd_wtr_0c)
+
+# Fitted vs actual
+yoy_surveys$predicted = predict.MixRF(mixed.rf.recruit, yoy_surveys, EstimateRE = T)
+
+#fitted vs predicted
+yoy_surveys %>%
+  ggplot() + 
+  geom_point(aes(x = cpue, y = predicted)) + 
+  geom_abline (slope=1, linetype = "dashed", color="Red") +
+  ggtitle("YOY predicted vs fitted") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12))
+#ggsave("./figures/recruitment.predVSfit.jpeg")
+```
+
+
+# remove big objects (recruits)
+```{r}
+rm(mixed.rf.recruit)
+```
+
+
+# Size structure modeling
+```{r}
+independent <- size_temp_train %>% 
+  select(!c("lake_id", "lake_name.1", "n_over500", "p_over500"))
+
+cor <- Hmisc::rcorr(as.matrix(independent))$r
+
+# high correlation (>.6)
+# acres-shore miles, secchi has ~.4-.5 with all temp metrics
+# practically all temp metrics
+# good temp variables post-ice-warm rate, coef_var, date_over
+
+independent <- size_temp_train %>% 
+  select(c("year", "julian_day",
+           "log_acres", "STOCKED", "BACI", "median_secchi", 
+           "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7", 
+           "mean_surf_JulAugSep","mean_surf_may", "ice_off_jday",
+           "ice_off_jday", "coef_var_1_30", "coef_var_31_60")) 
+
+
+
+# Fit Mixed Effects RF
+mixed.rf.size <- MixRF(Y = size_temp_train$p_over500 , X = independent, 
+                  random = "(1|lake_id)", data = size_temp_train, 
+                  importance = T,
+                  mtry = sqrt(ncol(independent)), ntree = 1000)
+                  
+#write_rds(mixed.rf.size, "./models/adult.mixed.size.rf.rds")  
+#
+mixed.rf.size <- readRDS("./models/adult.mixed.size.rf.rds")
+#mixed.rf.size$forest
+#varImpPlot(mixed.rf.size$forest)
+
+random.size <- as.data.frame(ranef(mixed.rf.size$MixedModel)) %>%
+  mutate(
+    spot = "Spot",
+    upper = condval + 1.96*condsd,
+    lower = condval - 1.96*condsd,
+    spot = ifelse(upper*-1 <0& lower*-1<0, "Bright Spot", spot ),
+    spot = ifelse(upper*-1 >0& lower*-1>0, "Dark Spot", spot )) %>%
+  rename(lake_id = grp) %>% select(!c("grpvar", "term"))
+```
+
+# Size bright spots plots
+```{r}
+location <- size_temp_train %>% select(lake_id, lake_name.1, x, y) %>% 
+  distinct(lake_id, .keep_all = T)
+
+bright.spots.size <- merge(x = random.size, y = location, 
+                         by = "lake_id", all.x = T) %>%
+  mutate(size = ifelse(spot == "Spot", T, F))
+
+mn_counties <- map_data("state", "Minnesota")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
 
 ggplot() + 
   geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
                colour="black", fill="NA", lwd=1 )  + 
   # color changes state outline, fill changes state fill
   coord_fixed(1.3) +
-  geom_point(data = overlap, aes(x=x, y=y, color = sychrony, alpha = sychrony, size = sychrony)) + 
+  geom_point(data = bright.spots.size, aes(x=x, y=y, color = spot, alpha = size, size = size)) + 
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "Gill net",
+       subtitle = "1006 Lakes, 98 Bright Spots, 75 Dark spots",
+       x = "Longitude", y = "Latitude", color = "Spots") 
+#ggsave("./figures/size_brightspots.jpeg")
+```
+
+# Size plots and messing around
+```{r}
+size.importance <- importance(mixed.rf.size$forest) 
+size.importance <- cbind("variable" = rownames(size.importance), 
+                       data.frame(size.importance, row.names=NULL)) %>%
+  rename(increase_MSE = X.IncMSE)
+
+size.importance %>% 
+  ggplot(aes(x=reorder(variable, increase_MSE), y = increase_MSE)) +
+  geom_point() + 
+  geom_segment(aes(x = variable, xend = variable, y=0, yend = increase_MSE)) + 
+  coord_flip() + xlab("Variable") + ylab("% increase in MSE") + 
+  ggtitle("Proportion over 500mm importance") +
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12))
+ggsave("./figures/size.importance.jpeg")
+
+#partialPlot(mixed.rf.size, independent, BACI)
+#partialPlot(mixed.rf.size, independent, cpue_yep)
+#partialPlot(mixed.rf.size, independent, gdd_wtr_0c)
+
+# Fitted vs actual
+size_temp_train$predicted = predict.MixRF(mixed.rf.size, size_temp_train, EstimateRE = T)
+
+size_temp_train %>%
+  ggplot() + 
+  geom_point(aes(x = p_over500, y = predicted)) + 
+  geom_abline (slope=1, linetype = "dashed", color="Red") +
+  ggtitle("YOY predicted vs fitted") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12))
+ggsave("./figures/size.predVSfit.jpeg")
+```
+
+
+
+# Overlap (GN - YOY)
+```{r}
+overlap.yoy.gn <- merge(x = bright.spots.yoy,  y = bright.spots.gn, by = c("lake_id")) %>%
+  mutate(sychrony = ifelse(spot.x == spot.y, "Yes", "No")) %>%
+  rename(yoy_spot = spot.x, gn_spot = spot.y,
+         x = x.x, y= y.x ) %>%
+  dplyr::select(lake_id, yoy_spot, gn_spot, sychrony, y, x)
+
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = overlap.yoy.gn, aes(x=x, y=y, color = sychrony, alpha = sychrony, size = sychrony)) + 
   #scale_color_manual(values = group.colors) +
   scale_alpha_discrete(range = c(1, .25), guide = 'none') +
   scale_size_discrete(range = c(2, 1), guide = 'none') +
@@ -223,6 +422,68 @@ ggplot() +
   labs(title = "Sychrony between gillnet and\n recruitment brightspots",
        subtitle = "155 Lakes, 109 Yes, 46 No",
        x = "Longitude", y = "Latitude", color = "Sychrony\nbetween spots") 
-#ggsave("./figures/synchrony.jpeg")
+#ggsave("./figures/synchrony.gn.yoy.jpeg")
+```
+
+# Overlap (GN - Size)
+```{r}
+overlap.size.gn <- merge(x = bright.spots.size,  y = bright.spots.gn, by = c("lake_id")) %>%
+  mutate(sychrony = ifelse(spot.x == spot.y, "Yes", "No")) %>%
+  rename(size_spot = spot.x, gn_spot = spot.y,
+         x = x.x, y= y.x ) %>%
+  dplyr::select(lake_id, size_spot, gn_spot, sychrony, y, x)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = overlap.size.gn, aes(x=x, y=y, color = sychrony, alpha = sychrony, size = sychrony)) + 
+  #scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) + 
+  labs(title = "Sychrony between gillnet and\n size structure brightspots",
+       subtitle = "1006 Lakes, 765 Yes, 241 No",
+       x = "Longitude", y = "Latitude", color = "Sychrony\nbetween spots") 
+#ggsave("./figures/synchrony.gn.size.jpeg")
+```
+
+# Overlap (YOY - Size)
+```{r}
+overlap.size.gn <- merge(x = bright.spots.size,  y = bright.spots.yoy, by = c("lake_id")) %>%
+  mutate(sychrony = ifelse(spot.x == spot.y, "Yes", "No")) %>%
+  rename(size_spot = spot.x, yoy_spot = spot.y,
+         x = x.x, y= y.x ) %>%
+  dplyr::select(lake_id, size_spot, yoy_spot, sychrony, y, x)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = overlap.size.gn, aes(x=x, y=y, color = sychrony, alpha = sychrony, size = sychrony)) + 
+  #scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) + 
+  labs(title = "Sychrony between YOY and\n size structure brightspots",
+       subtitle = "105 Lakes, 87 Yes, 28 No",
+       x = "Longitude", y = "Latitude", color = "Sychrony\nbetween spots") 
+#ggsave("./figures/synchrony.yoy.size.jpeg")
 ```
 

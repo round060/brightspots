@@ -55,7 +55,8 @@ walleye_size <- mn_data %>%
   filter(!is.na(length.1)) %>%
   mutate(greater_than_500 = as.numeric(length.1 >= 500)) %>%
   group_by(effort_ident, lake_id, date_clean, nhdhr.id, lake_name.1, total_effort_1.1, count) %>%
-  summarize(n_over500 = sum(greater_than_500)) %>%
+  summarize(n_over500 = sum(greater_than_500),
+            mean_length = mean(length.1)) %>%
   mutate(p_over500 = n_over500/count)
 
 all_wae_size <- rbind(walleye_nocatch, walleye_size) %>%
@@ -101,15 +102,11 @@ size_spatial <- merge(x = all_wae_size, y = mn_gn_lakes_clean,
 # removes river gill netting
 ```
 
-```{r}
-rm()
-```
-
-
 # Add stocking data
 ```{r stocking_gn}
 stocking <- read.csv("./data/covariate/mn_wae_stocking.csv") %>% 
-  rename(lake_id = DOW, year = Year) %>% mutate(lake_id = fixlakeid(lake_id))
+  rename(lake_id = DOW, year = Year) %>% mutate(lake_id = fixlakeid(lake_id)) %>%
+  mutate(lake_id = ifelse(lake_id == "04003500", "04003501", lake_id))
 
 size_stocking <- merge(x = size_spatial, y = stocking, 
                          by = c("lake_id", "year"), all.x = T) %>%
@@ -281,8 +278,7 @@ size_temp_train <- size_temp_clean %>%
   group_by(lake_id) %>% 
   mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE)))) %>%
   ungroup() %>% filter(!is.na(median_secchi))
-#
-write.csv(size_temp_train, "./data/adult_size_data.csv", row.names = F)
+#write.csv(size_temp_train, "./data/adult_size_data.csv", row.names = F)
 ```
 
 
