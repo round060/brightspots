@@ -85,7 +85,7 @@ mn_gn_lakes_clean <- as.data.frame(mn_gn_lakes) %>%
   select("dowlknum", "pw_basin_n","acres","wb_class", "shore_mi", "x", "y") %>%
   dplyr::filter(pw_basin_n != "Mississippi River - Pepin (WI)") %>%
   rename(lake_id = dowlknum) %>% distinct(lake_id, .keep_all = T) %>%
-  # make sure some riverish lakes stay (lake pepin, laq que parle)
+  # make sure some riverish lakes stay (lake pepin, laq qui parle)
   mutate(wb_class = ifelse(lake_id == "25000100", 
                            "semiriverine polygon", wb_class),
          wb_class = ifelse(lake_id == "37004600", 
@@ -95,11 +95,19 @@ mn_gn_lakes_clean <- as.data.frame(mn_gn_lakes) %>%
          wb_class = ifelse(lake_id == "69129100", 
                            "semiriverine polygon", wb_class))
 
-size_spatial <- merge(x = all_wae_size, y = mn_gn_lakes_clean, 
+size_spatial.nodepth <- merge(x = all_wae_size, y = mn_gn_lakes_clean, 
                     by = "lake_id", all.x = T) %>%
   dplyr::filter(wb_class != "Riverine polygon") %>%
   mutate(lake_id = fixlakeid(lake_id))
 # removes river gill netting
+
+mn_depth <- read.csv("./data/lake_metadata.csv") %>% 
+  dplyr::filter(site_id %in% size_spatial.nodepth$nhdhr.id) %>%
+  dplyr::select(site_id, max_depth, area, elevation) %>%
+  rename(nhdhr.id = site_id)
+
+size_spatial <- merge(size_spatial.nodepth, mn_depth, by = "nhdhr.id",
+                      all.x = T)
 ```
 
 # Add stocking data
@@ -108,16 +116,57 @@ stocking <- read.csv("./data/covariate/mn_wae_stocking.csv") %>%
   rename(lake_id = DOW, year = Year) %>% mutate(lake_id = fixlakeid(lake_id)) %>%
   mutate(lake_id = ifelse(lake_id == "04003500", "04003501", lake_id))
 
+# add current year stocking
 size_stocking <- merge(x = size_spatial, y = stocking, 
                          by = c("lake_id", "year"), all.x = T) %>%
   mutate(across(FRY:frl.pa, ~ ifelse(is.na(.), 0, .))) %>%
   mutate(julian_day = yday(date_clean))  %>%
   #If any are stocked make Stocked = 1
-  mutate(STOCKED =  ifelse(rowSums(across(fry.pa:frl.pa)) > 0, 1, 0))
+  mutate(STOCKED =  ifelse(rowSums(across(fry.pa:frl.pa)) > 0, 1, 0),
+         fry.pa = FRY/acres, 
+         fgl.pa = FGL/acres, 
+         adl.pa = ADL/acres, 
+         yrl.pa = YRL/acres,
+         frl.pa = FRL/acres) %>%
+  dplyr::select(-c(FRY:FRL))
+
+# add previous year stocking
+
+stocking.previous <- stocking %>% mutate(year = year + 1) %>%
+  rename_with(~ paste(., ".previous", sep = ""), FRY:frl.pa)
+
+size_stocking <- merge(x = size_stocking, y = stocking.previous, 
+                         by = c("lake_id", "year"), all.x = T) %>%
+  mutate(across(FRY.previous:frl.pa.previous, ~ ifelse(is.na(.), 0, .))) %>%
+  #If any are stocked make Stocked = 1
+  mutate(STOCKED.previous =  ifelse(rowSums(across(fry.pa.previous:frl.pa.previous)) > 0, 1, 0),
+         fry.pa.previous = FRY.previous/acres, 
+         fgl.pa.previous = FGL.previous/acres, 
+         adl.pa.previous = ADL.previous/acres, 
+         yrl.pa.previous = YRL.previous/acres,
+         frl.pa.previous = FRL.previous/acres) %>%
+  dplyr::select(-c(FRY.previous:FRL.previous))
+
+# add two year ago stocking
+
+stocking.2.previous <- stocking %>% mutate(year = year + 2) %>%
+  rename_with(~ paste(., ".2.previous", sep = ""), FRY:frl.pa)
+
+size_stocking <- merge(x = size_stocking, y = stocking.2.previous, 
+                         by = c("lake_id", "year"), all.x = T) %>%
+  mutate(across(FRY.2.previous:frl.pa.2.previous, ~ ifelse(is.na(.), 0, .))) %>%
+  #If any are stocked make Stocked = 1
+  mutate(STOCKED.2.previous =  ifelse(rowSums(across(fry.pa.2.previous:frl.pa.2.previous)) > 0, 1, 0),
+         fry.pa.2.previous = FRY.2.previous/acres, 
+         fgl.pa.2.previous = FGL.2.previous/acres, 
+         adl.pa.2.previous = ADL.2.previous/acres, 
+         yrl.pa.2.previous = YRL.2.previous/acres,
+         frl.pa.2.previous = FRL.2.previous/acres) %>%
+  dplyr::select(-c(FRY.2.previous:FRL.2.previous))
 
 ```
 
-# Add Secchi data to gill net surveys
+# Add remotely sensed Secchi data to gill net surveys
 ```{r gn_secchi}
 secchi <- read.csv("./data/covariate/MN_AnnualSecchi_update.csv") %>%
   select(year, median_secchi, Prmnn_I) %>%
@@ -133,46 +182,112 @@ secchi.full = merge(x = secchi, y = nhd.id,
   select(local.id, nhdhr.id, lagos.id, year, median_secchi) %>%
   rename(lake_id = local.id) %>%
   group_by(lake_id, nhdhr.id, year) %>% 
-  distinct(.keep_all = T) %>% ungroup()
+  distinct(.keep_all = T) %>% ungroup() %>%
+  dplyr::select(lake_id, year, median_secchi) %>%
+  mutate(secchi.source = "RS")
 
 # add remotely sensed secchi to the gill net data
 size_secchi <- merge(x = size_stocking, y = secchi.full, 
                    by = c("lake_id", "year"), all.x = T)
 
-# Which Secchis are we missing? (when we have 3+ years of surveys)
-na_secchi <- size_secchi %>% dplyr::filter(is.na(median_secchi)) %>%
-  group_by(lake_id) %>% count() %>% filter(n >= 3) 
+secchi.prior <- secchi.full %>% mutate(year = year + 1) %>%
+  rename(median_secchi_previous = median_secchi) %>%
+  mutate(secchi.source.prior = "RS") %>%
+  dplyr::select(lake_id, year, median_secchi_previous, secchi.source.prior)
 
-# select those surveys
-missing_secchi <-  size_secchi %>% dplyr::filter(is.na(median_secchi)) %>%
-  filter(year < 2019) %>%
-  filter(lake_id %in% na_secchi$lake_id) %>% dplyr::select(year, lake_id)
+size_secchi <- merge(x = size_secchi, y = secchi.prior, 
+                   by = c("lake_id", "year"), all.x = T)
 
-# what surveys does Kelsey have that we are missing?
-secchi_file_list <- list.files("./data/Secchi_Predictions/")
+secchi.2.prior <- secchi.full %>% mutate(year = year + 2) %>%
+  rename(median_secchi_previous_2 = median_secchi) %>%
+  dplyr::select(lake_id, year, median_secchi_previous_2) %>%
+  mutate(secchi.source.2 = "RS")
 
-matching_kv_secchi <- missing_secchi %>% 
-  filter(missing_secchi$lake_id %in% substr(secchi_file_list, 1, 8))
+size_secchi <- merge(x = size_secchi, y = secchi.2.prior, 
+                   by = c("lake_id", "year"), all.x = T)
+```
+
+
+# Add in KV secchi 
+```{r}
+kv_surveys <- function(offset = 0){
   
-# read in those observations and calculate median Secchi
-matching_kv_secchi$median_secchi <- -999
+  if (offset == 0){
+    # Which Secchis are we missing? (when we have 3+ years of surveys)
+    na_secchi <- size_secchi %>% dplyr::filter(is.na(median_secchi)) %>%
+      group_by(lake_id) %>% count() %>% filter(n >= 3) 
+    # select those surveys
+    missing_secchi <-  size_secchi %>% dplyr::filter(is.na(median_secchi)) %>%
+      filter(year < 2019) %>%
+      filter(lake_id %in% na_secchi$lake_id) %>% dplyr::select(year, lake_id)
+  }
+  
+  if (offset == 1){
+    # Which Secchis are we missing? (when we have 3+ years of surveys)
+    na_secchi <- size_secchi %>% dplyr::filter(is.na(median_secchi_previous)) %>%
+      group_by(lake_id) %>% count() %>% filter(n >= 3)
+    # select those surveys
+    missing_secchi <-  size_secchi %>% dplyr::filter(is.na(median_secchi_previous)) %>%
+      filter(year < 2019) %>%
+      filter(lake_id %in% na_secchi$lake_id) %>% dplyr::select(year, lake_id)
+  }
 
-for (i in 1:nrow(matching_kv_secchi)) {
-  dow <- matching_kv_secchi$lake_id[i]
-  survey_year <- matching_kv_secchi$year[i]
-  secchi_temp <- readRDS(paste0("./data/Secchi_Predictions/", dow, 
-                                "_daily_secchi.rds"))
-  filter_secchi_temp <- secchi_temp %>% 
-    filter(Year == survey_year) %>% filter(DOY > 150, DOY < 300) 
-  matching_kv_secchi$median_secchi[i] <- median(filter_secchi_temp$Fit, na.rm = T)
+  if (offset == 2){
+    # Which Secchis are we missing? (when we have 3+ years of surveys)
+    na_secchi <- size_secchi %>% dplyr::filter(is.na(median_secchi_previous_2)) %>%
+      group_by(lake_id) %>% count() %>% filter(n >= 3) 
+    # select those surveys
+    missing_secchi <-  size_secchi %>% dplyr::filter(is.na(median_secchi_previous_2)) %>%
+      filter(year < 2019) %>%
+      filter(lake_id %in% na_secchi$lake_id) %>% dplyr::select(year, lake_id)
+  }
+  
+  # what surveys does Kelsey have that we are missing?
+  secchi_file_list <- list.files("./data/Secchi_Predictions/")
+  
+  matching_kv_secchi <- missing_secchi %>% 
+    filter(missing_secchi$lake_id %in% substr(secchi_file_list, 1, 8))
+    
+  # read in those observations and calculate median Secchi
+  matching_kv_secchi$median_secchi <- -999
+  
+  for (i in 1:nrow(matching_kv_secchi)) {
+    dow <- matching_kv_secchi$lake_id[i]
+    survey_year <- matching_kv_secchi$year[i] + offset
+    secchi_temp <- readRDS(paste0("./data/Secchi_Predictions/", dow, 
+                                  "_daily_secchi.rds"))
+    filter_secchi_temp <- secchi_temp %>% 
+      filter(Year == survey_year) %>% filter(DOY > 150, DOY < 300) 
+    matching_kv_secchi$median_secchi[i] <- median(filter_secchi_temp$Fit, na.rm = T)
+  }
+  
+  matching_kv_secchi <- matching_kv_secchi %>% distinct(lake_id, year, median_secchi) %>% 
+    mutate(secchi.source = "KV")
+  
+  if (offset == 1){
+    colnames(matching_kv_secchi) = c("lake_id", "year", "median_secchi_previous", "secchi.source.prior")
+  }
+  if (offset == 2){
+    colnames(matching_kv_secchi) = c("lake_id", "year", "median_secchi_previous_2", "secchi.source.2")
+  }
+  size_secchi <- size_secchi %>% 
+    rows_update(y = matching_kv_secchi, by = c("year", "lake_id"))
+  
+  return(size_secchi)
 }
 
-matching_kv_secchi <- matching_kv_secchi %>% distinct(lake_id, year, median_secchi) 
+size_secchi <- kv_surveys(offset = 0)
+size_secchi <- kv_surveys(offset = 1)
+size_secchi <- kv_surveys(offset = 2)
 
-size_secchi <- size_secchi %>% 
-  rows_update(y = matching_kv_secchi, by = c("year", "lake_id"))
+missing_secchi <-  size_secchi %>% filter(is.na(median_secchi)) %>% group_by(lake_id) %>% count
+```
 
-missing_secchi <-  size_secchi %>% filter(is.na(median_secchi)) 
+# remove first sets of objects
+```{r}
+rm(secchi.full); rm(secchi.prior); rm(secchi.2.prior);
+rm(size_spatial.nodepth); rm(mn_depth); rm(mn_gn_lakes); rm(mn_gn_lakes_clean)
+rm(stocking); rm(stocking.previous); rm(stocking.2.previous); rm(secchi_temp)
 ```
 
 
@@ -201,17 +316,15 @@ size_ais <- merge(x = size_secchi, y = ais,
 
 ```
 
+
 ```{r}
 missing_ids <- data.frame(
   lake_id = c("69069400", "69060800", "38053200", "38021100", "16063300"), 
-  nhdhr.id.x = c("nhdhr_120019354", "nhdhr_80993113", 
+  nhdhr.id = c("nhdhr_120019354", "nhdhr_80993113", 
                "nhdhr_72d19d48-754d-459b-a1f2-b1cfd8993b06", "nhdhr_80993749", 
                "nhdhr_120019082"))
-size_ais = size_ais %>% rows_update(y = missing_ids, by = c("lake_id")) %>%
-  relocate(lake_id, nhdhr.id.x, lake_name.1) %>%
-  rename(nhdhr.id = nhdhr.id.x) %>% dplyr::select(!c(nhdhr.id.y))
+size_ais = size_ais %>% rows_update(y = missing_ids, by = c("lake_id")) 
 ```
-
 
 
 # temperature metrics
@@ -219,17 +332,31 @@ size_ais = size_ais %>% rows_update(y = missing_ids, by = c("lake_id")) %>%
 current_temps <- read_feather(
   "./data/lake_temperature_metrics_GLM_NLDAS.feather") %>% 
   dplyr::select(site_id, year, peak_temp, ice_off_date, 
-                coef_var_1_30, coef_var_31_60,
+                winter_dur_0_4, coef_var_1_30, coef_var_31_60,
                 gdd_wtr_0c, gdd_wtr_5c, gdd_wtr_10c, contains("mean_surf"),
                 post_ice_warm_rate, contains("date_over")) %>% 
   rename(nhdhr.id = site_id)
 
+  
+# add temp data from prior year 
 size_temp <- merge(size_ais, current_temps, 
                  by = c("year", "nhdhr.id"), all.x = T) %>%
-  dplyr::filter(effort_ident != 36874) %>%
-  filter(!is.na(peak_temp))
+  dplyr::filter(effort_ident != 36874)
 
-gn_temp_na <- merge(size_ais, current_temps, 
+temp.previous <- current_temps %>% mutate(year = year + 1) %>%
+  rename_with(~ paste(., ".previous", sep = ""), peak_temp:date_over_21)
+
+size_temp <- merge(size_temp, temp.previous, 
+                 by = c("year", "nhdhr.id"), all.x = T)
+
+# add temp data from 2 years prior
+temp.2.previous <- current_temps %>% mutate(year = year + 2) %>%
+  rename_with(~ paste(., ".2.previous", sep = ""), peak_temp:date_over_21)
+
+size_temp <- merge(size_temp, temp.2.previous, 
+                 by = c("year", "nhdhr.id"), all.x = T)
+
+size_temp_na <- merge(size_ais, current_temps, 
                     by = c("year", "nhdhr.id"), all.x = T) %>% 
   filter(is.na(peak_temp)) %>% 
   filter(year != 2022) %>% group_by(nhdhr.id) %>%
@@ -239,17 +366,25 @@ gn_temp_na <- merge(size_ais, current_temps,
 # remove random junk
 ```{r}
 rm(current_temps); rm(size_stocking); rm(size_ais); rm(mn_lakes); 
-rm(mn_gn_lakes); rm(mn_gn_lakes_clean); rm(stocking); rm(ais)
+rm(ais)
 rm(secchi); rm(missing_secchi); rm(na_secchi); rm(all_wae_size);
-rm(size_secchi); rm(secchi_temp); rm(secchi.full); rm(suitable_surveys)
+rm(size_secchi);
 rm(walleye_nocatch); rm(walleye_size); rm(size_spatial); 
-rm(filter_secchi_temp); rm(nhd.id); rm(matching_kv_secchi)
+rm(nhd.id);  
+rm(temp.previous); rm(temp.2.previous)
+```
+
+# add fish data
+```{r}
+fish_data <- suitable_surveys %>% filter(effort_ident %in% size_temp$effort_ident) %>%
+  dplyr::select(effort_ident, cpue_yep, cpue_np, cpue_cisco)
+
+size_fish<- merge(size_temp, fish_data, by = "effort_ident")
 ```
 
 
-
 ```{r}
-size_temp_clean <- size_temp %>%
+size_temp_clean <- size_fish %>%
   dplyr::filter(year >= 1988) %>%
   mutate(year_f = as.factor(year),
          log_acres = log(acres),
@@ -267,14 +402,11 @@ size_temp_train <- size_temp_clean %>%
          STOCKED = as.factor(STOCKED),
          BACI = as.factor(BACI)) %>%
   select(c("lake_id", "lake_name.1", "x", "y","n_over500", "p_over500",
-           "year","julian_day", 
-           "log_acres", "log_shore_mi",  "STOCKED", "BACI", 
-           "median_secchi", "gdd_wtr_0c", "gdd_wtr_5c", "gdd_wtr_10c",
-           "post_ice_warm_rate", "date_over_16.7", "mean_surf_apr",
-           "mean_surf_aug", "mean_surf_jul", "mean_surf_jun", 
-           "mean_surf_may", "mean_surf_nov", "mean_surf_oct", 
-           "mean_surf_sep", "mean_surf_JulAugSep",
-           "ice_off_jday", "coef_var_1_30", "coef_var_31_60")) %>% 
+           "year","julian_day", "log_acres", "cpue_yep","cpue_cisco", "cpue_np", 
+           "log_shore_mi", "elevation", "max_depth", "BACI",
+           fry.pa:STOCKED.2.previous,
+           "median_secchi", "median_secchi_previous", "median_secchi_previous_2",
+           peak_temp:date_over_21.2.previous)) %>% 
   group_by(lake_id) %>% 
   mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE)))) %>%
   ungroup() %>% filter(!is.na(median_secchi))

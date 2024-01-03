@@ -24,8 +24,7 @@ mn_data <- open_dataset("./data/mn_file_arrow/")
 efish_wae <- read.csv("./data/Kundel_EF_DATA_Final.csv") %>% 
   mutate(DOW = fixlakeid(DOW_KITTLE)) %>%
   dplyr::select(!c(SURVEY_ID, DOW_KITTLE, AREA_NAME, REGION_NAME, SAMPLING_END_DATE))
-
-
+  
 ```
 
 
@@ -70,7 +69,8 @@ zero_catch <- recent_surveys %>%
   mutate(catch = 0, CPUE = 0)
 
 new_surveys <- rbind(new_efishing, zero_catch) %>%
-  mutate(lake_id = fixlakeid(lake_id))
+  mutate(lake_id = fixlakeid(lake_id)) %>%
+  filter(!effort_ident %in% c("4600", "336", "28882", "14566"))
 
 new_ef_dows <- unique(new_surveys$lake_id)
 
@@ -199,14 +199,10 @@ new_surveys_secchi <- new_surveys_secchi %>% group_by(year, lake_id) %>%
 efish_merge <- efish_wae %>% 
   mutate(julian_day = yday(as.Date(SAMPLING_START_DATE)),
          acres = AREA_HECTARES*2.47105,
-         fry.pa = ifelse(FRY == "Y", 1, 0),
-         frl.pa = ifelse(FRL == "Y", 1, 0),
-         fgl.pa = ifelse(FGL == "Y", 1, 0),
-         yrl.pa = ifelse(YRL == "Y", 1, 0),
          YEAR_INFESTED = ifelse(is.na(YEAR_INFESTED), 0, YEAR_INFESTED),
          infested = as.factor(INVASION_STATUS_BINARY)) %>%
   select(SURVEY_YEAR, DOW, TOTAL_CATCH, EFFORT, acres, SHORE_LENGTH_MILES,
-         STOCKED, fry.pa, frl.pa, fgl.pa, yrl.pa, julian_day, YEAR_INFESTED,
+         STOCKED, julian_day, YEAR_INFESTED,
          infested, LAKE_CENTER_LAT_DD5, LAKE_CENTER_LONG_DD5, 
          ANNUAL_MED_SECCHI_M) %>%
   rename(year = SURVEY_YEAR, lake_id = DOW, 
@@ -217,13 +213,33 @@ efish_merge <- efish_wae %>%
 
 new_surveys_merge <- new_surveys_secchi %>%
     select(year, lake_id, catch, total_effort_1.1, acres, shore_mi, x, y, infested, 
-           year_confirmed, julian_day, STOCKED, median_secchi,
-         contains(".pa")) %>% select(!adl.pa) %>%
+           year_confirmed, julian_day, STOCKED, median_secchi) %>% #select(!adl.pa) %>%
   mutate(STOCKED = as.factor(STOCKED)) %>% ungroup()
 
 surveys.ef <- rbind(new_surveys_merge, efish_merge) %>%
-  mutate_at(vars(contains(".pa")), ~  as.factor(.))
+  mutate(year_confirmed = as.numeric(year_confirmed),
+         year_confirmed = ifelse(is.na(year_confirmed),0, year_confirmed),
+         BACI = ifelse(year_confirmed > year, 1, 0),
+         BACI = ifelse(year_confirmed > 1900 & year_confirmed <= year, 2, BACI),
+         BACI = ifelse(year_confirmed < 1900, 3, BACI),
+         BACI = ifelse(BACI == 3 & year > 2016, 4, BACI)) 
 
+stocking <- read.csv("./data/covariate/mn_wae_stocking.csv") %>% 
+  rename(lake_id = DOW, year = Year) %>%
+  mutate(lake_id = ifelse(lake_id == "04003500", "04003501", lake_id))
+
+
+surveys_stocking <- merge(x = surveys.ef, y = stocking, 
+                         by = c("lake_id", "year"), all.x = T) %>%
+  mutate(across(FRY:frl.pa, ~ ifelse(is.na(.), 0, .))) %>%
+  #If any are stocked make Stocked = 1
+  mutate(STOCKED =  ifelse(rowSums(across(fry.pa:frl.pa)) > 0, 1, 0),
+         fry.pa = FRY/acres, 
+         fgl.pa = FGL/acres, 
+         adl.pa = ADL/acres, 
+         yrl.pa = YRL/acres,
+         frl.pa = FRL/acres) %>%
+  dplyr::select(-c(FRY:FRL))
 ```
 
 
@@ -231,7 +247,7 @@ surveys.ef <- rbind(new_surveys_merge, efish_merge) %>%
 ```{r}
 rm(new_surveys); rm(new_surveys_ais); rm(new_surveys_spatial); rm(new_surveys_stocking)
 rm(recent_surveys); rm(ais); rm(stocking); rm(mn_lakes);rm(efish_wae); rm(efish_merge);
-rm(secchi.full); rm(secchi); rm(dow_id); 
+rm(secchi.full); rm(secchi); rm(surveys.ef)
 rm(new_surveys_merge); rm(new_surveys_secchi); 
 ```
 
@@ -244,7 +260,7 @@ current_temps <- read_feather("./data/lake_temperature_metrics_GLM_NLDAS.feather
                 post_ice_warm_rate, contains("date_over"))
 
 
-dow_year <- surveys.ef %>% distinct(lake_id, year)
+dow_year <- surveys_stocking %>% distinct(lake_id, year)
 dow_nhdhr <- readRDS("./data/mndow_nhdhr_xwalk.rds") %>% rename(lake_id = MNDOW_ID) %>%
   mutate(lake_id = gsub("^.{0,6}", "", lake_id))
 
@@ -255,7 +271,7 @@ missing_ids <- data.frame(
                "nhdhr_120019082"))
 dow_nhdhr = dow_nhdhr %>% rows_update(y = missing_ids, by = c("lake_id"))
 
-surveys_no_temp <- merge(surveys.ef, dow_nhdhr, by = c("lake_id"), all.x = T)
+surveys_no_temp <- merge(surveys_stocking, dow_nhdhr, by = c("lake_id"), all.x = T)
 
 filtered_temp <- current_temps %>% 
   dplyr::filter(site_id %in% surveys_no_temp$site_id) 
@@ -293,11 +309,10 @@ model_surveys_ef <- surveys_ef %>%
 
 
 yoy_ef <- model_surveys_ef %>%
-  select(lake_id, x, y, year, cpue, infested,
-         log_acres, log_shore,
-         julian_day, median_secchi, 19:46,
-         STOCKED, contains(".pa")) 
-write.csv(yoy_ef, "./data/yoy_catch_data.csv", row.names = F)
+  select(!c(site_id, catch, total_effort_1.1, acres, shore_mi,
+            infested, year_confirmed, fgl.pa, adl.pa, yrl.pa, frl.pa))
+
+#write.csv(yoy_ef, "./data/yoy_catch_data.csv", row.names = F)
 ```
 
 
