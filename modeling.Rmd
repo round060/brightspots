@@ -20,8 +20,9 @@ gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
          ice_off_date = lubridate::yday(ice_off_date),
          ice_off_date.previous = lubridate::yday(ice_off_date.previous),
          ice_off_date.2.previous = lubridate::yday(ice_off_date.2.previous),
-         log_cpue = log(cpue+.01), 
-         three_year_secchi = (median_secchi + median_secchi_previous+ median_secchi_previous_2)/3)
+         log_cpue = log(cpue + 0.01), 
+         three_year_secchi = (median_secchi + median_secchi_previous +
+                                median_secchi_previous_2)/3)
 
 gn_temp_train <- gn_temp_train[complete.cases(gn_temp_train), ]
 
@@ -29,13 +30,15 @@ gn_temp_train <- gn_temp_train[complete.cases(gn_temp_train), ]
 yoy_surveys <- read.csv("./data/yoy_catch_data.csv") %>%
     mutate(BACI = as.factor(BACI),
          STOCKED = as.factor(STOCKED),
-         log_cpue = log(cpue+.01))
+         log_cpue = log(cpue + 0.01))
 
 # size structure data
 size_temp_train <- read.csv("./data/adult_size_data.csv") %>% 
   mutate(BACI = as.factor(BACI),
          STOCKED = as.factor(STOCKED),
-         three_year_secchi = (median_secchi + median_secchi_previous+ median_secchi_previous_2)/3)
+         three_year_secchi = (median_secchi + median_secchi_previous +
+                                median_secchi_previous_2)/3)
+size_temp_train <- size_temp_train[complete.cases(size_temp_train), ]
 ```
 
 
@@ -79,13 +82,14 @@ mixed.rf.gn <- MixRF(Y = gn_temp_train$log_cpue , X = independent.gn,
 #
 mixed.rf.gn <- readRDS("./models/adult.mixed.rf.rds")
 #mixed.rf.gn$forest
-#varImpPlot(mixed.rf.gn$forest, type = 1)
+#
+varImpPlot(mixed.rf.gn$forest, type = 1)
 
 random.gn <- as.data.frame(ranef(mixed.rf.gn$MixedModel)) %>%
   mutate(
     spot = "Spot",
-    upper = condval + 1.96*condsd,
-    lower = condval - 1.96*condsd,
+    upper = condval + 2*condsd,
+    lower = condval - 2*condsd,
     spot = ifelse(upper*-1 <0& lower*-1<0, "Bright Spot", spot ),
     spot = ifelse(upper*-1 >0& lower*-1>0, "Dark Spot", spot )) %>%
   rename(lake_id = grp) %>% select(!c("grpvar", "term"))
@@ -125,7 +129,7 @@ ggplot() +
         panel.grid.minor = element_blank(),
         panel.background = element_blank()) +
   labs(title = "Gill net",
-       #subtitle = "1341 Lakes, 116 Bright Spots, 50 Dark spots",
+       #subtitle = "1356 Lakes, 564 Bright Spots, 50 Dark spots",
        x = "Longitude", y = "Latitude", color = "Spots") 
 #
 ggsave("./figures/gillnet_brightspots.jpeg")
@@ -171,9 +175,6 @@ gn.importance %>%
   
 #ggsave("./figures/gill.net.importance.jpeg")
 
-#partialPlot(mixed.rf.gn$forest, independent.gn, BACI)
-#partialPlot(mixed.rf.gn$forest, independent.gn, cpue_yep)
-#partialPlot(mixed.rf.gn$forest, independent.gn, median_secchi)
 
 
 gn_temp_train$predicted = predict.MixRF(mixed.rf.gn, 
@@ -190,6 +191,23 @@ gn_temp_train %>%
         legend.title = element_text(size = 18),
         legend.text = element_text(size = 12))
 #ggsave("./figures/gill.net.predVSfit.jpeg")
+```
+
+# Gill net partial plots
+```{r}
+
+for (i in 1:ncol(independent.gn)){
+  col_names = colnames(independent.gn)
+  pd <- pdp::partial(mixed.rf.gn$forest, pred.var =col_names[i], train = independent.gn)
+  
+  pd %>% ggplot() +
+    geom_point(aes(y = pd[,2], x = pd[,1])) +
+    geom_line(aes(y = pd[,2], x = pd[,1])) +
+    xlab(col_names[i]) + ylab("y-hat") +
+    theme_classic()
+  ggsave(filename = paste0("./figures/gill_net_partial_plots/", col_names[i], "_partial.jpeg"))
+}
+
 ```
 
 
@@ -238,8 +256,10 @@ mixed.rf.size <- MixRF(Y = size_temp_train$p_over500 , X = independent,
 #write_rds(mixed.rf.size, "./models/adult.mixed.size.rf.rds")  
 #
 mixed.rf.size <- readRDS("./models/adult.mixed.size.rf.rds")
-#mixed.rf.size$forest
-#varImpPlot(mixed.rf.size$forest)
+#
+mixed.rf.size$forest
+#
+varImpPlot(mixed.rf.size$forest)
 
 random.size <- as.data.frame(ranef(mixed.rf.size$MixedModel)) %>%
   mutate(

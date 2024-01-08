@@ -34,6 +34,7 @@ missing_ids <- data.frame(
 adult_wae = adult_wae %>% rows_update(y = missing_ids, by = c("lake_id"))
 ```
 
+https://www.sciencebase.gov/catalog/item/6206d3c2d34ec05caca53071
 
 # Get gill net data from file
 ## Include gill nets that caught zero walleye
@@ -309,7 +310,7 @@ gn_ais <- merge(x = gn_secchi, y = ais,
 ```{r}
 
 current_temps <- read_feather(
-  "./data/lake_temperature_metrics_GLM_NLDAS.feather") %>% 
+  "./data/lake_temperature_metrics_GLM_NLDAS.feather") #%>% 
   dplyr::select(site_id, year, peak_temp, ice_off_date, 
                 winter_dur_0_4, coef_var_1_30, coef_var_31_60,
                 gdd_wtr_0c, gdd_wtr_5c, gdd_wtr_10c, contains("mean_surf"),
