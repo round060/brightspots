@@ -17,6 +17,8 @@ options(scipen=999)
 gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
   mutate(BACI = as.factor(BACI),
          STOCKED = as.factor(STOCKED),
+         STOCKED.previous = as.factor(STOCKED.previous), 
+         STOCKED.2.previous = as.factor(STOCKED.2.previous),
          ice_off_date = lubridate::yday(ice_off_date),
          ice_off_date.previous = lubridate::yday(ice_off_date.previous),
          ice_off_date.2.previous = lubridate::yday(ice_off_date.2.previous),
@@ -36,6 +38,8 @@ yoy_surveys <- read.csv("./data/yoy_catch_data.csv") %>%
 size_temp_train <- read.csv("./data/adult_size_data.csv") %>% 
   mutate(BACI = as.factor(BACI),
          STOCKED = as.factor(STOCKED),
+         STOCKED.previous = as.factor(STOCKED.previous), 
+         STOCKED.2.previous = as.factor(STOCKED.2.previous), 
          three_year_secchi = (median_secchi + median_secchi_previous +
                                 median_secchi_previous_2)/3)
 size_temp_train <- size_temp_train[complete.cases(size_temp_train), ]
@@ -59,7 +63,7 @@ cor <- Hmisc::rcorr(as.matrix(independent.gn))$r
 independent.gn <- gn_temp_train %>% 
   select(c("year", "julian_day", "cpue_yep","cpue_np","cpue_cisco",
            "log_acres", "max_depth", "elevation", "BACI", 
-           "three_year_secchi",
+           "median_secchi", "median_secchi_previous", "median_secchi_previous_2",
            "STOCKED", "STOCKED.previous", "STOCKED.2.previous", 
            "fry.pa", "fry.pa.previous", "fry.pa.2.previous",
            "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7", 
@@ -88,8 +92,8 @@ varImpPlot(mixed.rf.gn$forest, type = 1)
 random.gn <- as.data.frame(ranef(mixed.rf.gn$MixedModel)) %>%
   mutate(
     spot = "Spot",
-    upper = condval + 2*condsd,
-    lower = condval - 2*condsd,
+    upper = condval + 5*condsd,
+    lower = condval - 5*condsd,
     spot = ifelse(upper*-1 <0& lower*-1<0, "Bright Spot", spot ),
     spot = ifelse(upper*-1 >0& lower*-1>0, "Dark Spot", spot )) %>%
   rename(lake_id = grp) %>% select(!c("grpvar", "term"))
@@ -131,8 +135,7 @@ ggplot() +
   labs(title = "Gill net",
        #subtitle = "1356 Lakes, 564 Bright Spots, 50 Dark spots",
        x = "Longitude", y = "Latitude", color = "Spots") 
-#
-ggsave("./figures/gillnet_brightspots.jpeg")
+#ggsave("./figures/gillnet_brightspots.jpeg")
 
 
 temp <- gn_temp_train
@@ -195,6 +198,14 @@ gn_temp_train %>%
 
 # Gill net partial plots
 ```{r}
+pd <- pdp::partial(mixed.rf.gn$forest, pred.var ="three_year_secchi", train = independent.gn)
+pd %>% ggplot() +
+    geom_point(aes(y = pd[,2], x = pd[,1])) +
+    geom_line(aes(y = pd[,2], x = pd[,1])) +
+    ylab("y-hat") +
+    theme_classic()
+
+partialPlot(mixed.rf.gn$forest, independent.gn, three_year_secchi)
 
 for (i in 1:ncol(independent.gn)){
   col_names = colnames(independent.gn)
@@ -232,7 +243,7 @@ cor <- Hmisc::rcorr(as.matrix(independent))$r
 independent <- size_temp_train %>% 
   select(c("year", "julian_day", "cpue_yep","cpue_np","cpue_cisco",
            "log_acres", "max_depth", "elevation", "BACI", 
-           "three_year_secchi",
+           "median_secchi", "median_secchi_previous", "median_secchi_previous_2",
            "STOCKED", "STOCKED.previous", "STOCKED.2.previous", 
            "fry.pa", "fry.pa.previous", "fry.pa.2.previous",
            "gdd_wtr_0c", "post_ice_warm_rate", "date_over_16.7", 
@@ -419,6 +430,23 @@ ggplot() +
   labs(title = "YOY electrofishing",
        x = "Longitude", y = "Latitude", color = "Spots") 
 #ggsave("./figures/recruitment_brightspots.jpeg")
+```
+
+# Size Structure partial plots
+```{r}
+
+for (i in 1:ncol(independent)){
+  col_names = colnames(independent)
+  pd <- pdp::partial(mixed.rf.size$forest, pred.var =col_names[i], train = independent)
+  
+  pd %>% ggplot() +
+    geom_point(aes(y = pd[,2], x = pd[,1])) +
+    geom_line(aes(y = pd[,2], x = pd[,1])) +
+    xlab(col_names[i]) + ylab("y-hat") +
+    theme_classic()
+  ggsave(filename = paste0("./figures/size_structure_partial_plots/", col_names[i], "_partial.jpeg"))
+}
+
 ```
 
 # YOY plots and messing around

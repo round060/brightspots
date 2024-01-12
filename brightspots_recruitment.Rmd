@@ -64,12 +64,14 @@ new_efishing <- recent_efishing %>%
            date_clean, year, total_effort_1.1) %>%
   summarize(catch = n()) %>% mutate(CPUE = catch/total_effort_1.1)
 
+# Find surveys where no WAE YOY caught
 zero_catch <- recent_surveys %>% 
   dplyr::filter(!effort_ident %in% new_efishing$effort_ident) %>%
   mutate(catch = 0, CPUE = 0)
 
 new_surveys <- rbind(new_efishing, zero_catch) %>%
   mutate(lake_id = fixlakeid(lake_id)) %>%
+  #junky surveys
   filter(!effort_ident %in% c("4600", "336", "28882", "14566"))
 
 new_ef_dows <- unique(new_surveys$lake_id)
