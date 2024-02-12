@@ -28,6 +28,12 @@ gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
 
 gn_temp_train <- gn_temp_train[complete.cases(gn_temp_train), ]
 
+
+gn_temp_train %>% 
+  ggplot(aes(y = log_cpue, x = year)) + 
+  geom_point() +
+  geom_smooth()
+
 # E-fishing YOY data
 yoy_surveys <- read.csv("./data/yoy_catch_data.csv") %>%
     mutate(BACI = as.factor(BACI),
@@ -82,7 +88,8 @@ mixed.rf.gn <- MixRF(Y = gn_temp_train$log_cpue , X = independent.gn,
                   random = "(1|lake_id)", data = gn_temp_train, importance = T,
                   mtry = sqrt(ncol(independent.gn)), ntree = 500)
                   
-#write_rds(mixed.rf.gn, "./models/adult.mixed.rf.rds")  
+#
+write_rds(mixed.rf.gn, "./models/adult.mixed.rf.rds")  
 #
 mixed.rf.gn <- readRDS("./models/adult.mixed.rf.rds")
 #mixed.rf.gn$forest
@@ -198,14 +205,14 @@ gn_temp_train %>%
 
 # Gill net partial plots
 ```{r}
-pd <- pdp::partial(mixed.rf.gn$forest, pred.var ="three_year_secchi", train = independent.gn)
+pd <- pdp::partial(mixed.rf.gn$forest, pred.var ="median_secchi", train = independent.gn)
 pd %>% ggplot() +
     geom_point(aes(y = pd[,2], x = pd[,1])) +
     geom_line(aes(y = pd[,2], x = pd[,1])) +
     ylab("y-hat") +
     theme_classic()
 
-partialPlot(mixed.rf.gn$forest, independent.gn, three_year_secchi)
+partialPlot(mixed.rf.gn$forest, independent.gn, year)
 
 for (i in 1:ncol(independent.gn)){
   col_names = colnames(independent.gn)

@@ -310,7 +310,7 @@ gn_ais <- merge(x = gn_secchi, y = ais,
 ```{r}
 
 current_temps <- read_feather(
-  "./data/lake_temperature_metrics_GLM_NLDAS.feather") #%>% 
+  "./data/lake_temperature_metrics_GLM_NLDAS.feather") %>% 
   dplyr::select(site_id, year, peak_temp, ice_off_date, 
                 winter_dur_0_4, coef_var_1_30, coef_var_31_60,
                 gdd_wtr_0c, gdd_wtr_5c, gdd_wtr_10c, contains("mean_surf"),
@@ -379,11 +379,28 @@ gn_temp_train <- gn_temp_clean %>%
   group_by(lake_id) %>% 
   mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE)))) %>%
   ungroup() %>% filter(!is.na(median_secchi))
-write.csv(gn_temp_train, "./data/adult_catch_data.csv", row.names = F)
-
 #ex <- gn_temp %>% filter(lake_id == "39000200") %>% select(1:15) 
 
 #write.csv(ex, "multi_survey_ex.csv", row.names = F)
+```
+
+```{r}
+no_catch = gn_temp_train %>% group_by(lake_id) %>% summarise(mean_cpue = mean(cpue,na.rm = T), n = n()) %>%
+  filter(mean_cpue == 0)
+```
+
+# trout lakes
+```{r}
+gn_temp_train <- gn_temp_train %>% 
+  dplyr::filter(!lake_id %in% c(11031200, 11029500, 11082600, 16029700, 16004900, 16008700, 
+                                16033600, 29012700, 29023700, 3017700, 16002400, 16003100, 16008500,
+                                16023400, 16052900, 16058300, 16063400, 38002000, 38006500, 38044000, 
+                                38073700, 69129500, 69006400, 38068800, 38061500, 38040900, 31044400, 
+                                16062700, 16045000, 16022500, 16019200, 16015000, 16001500, 15012700, 
+                                15009000))
+
+write.csv(gn_temp_train, "./data/adult_catch_data.csv", row.names = F)
+
 ```
 
 

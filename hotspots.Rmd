@@ -28,6 +28,7 @@ total_ef_wae <- efish_wae %>%
 ```{r}
 adult_wae <- read.csv("./data/adult_catch_data.csv")
 
+
 best_adult_walleye <- adult_wae %>%
   group_by(lake_id, lake_name.1) %>%
   summarize(n = n(), mean_CPUE = mean(cpue), 
@@ -42,6 +43,38 @@ best_adult_walleye <- adult_wae %>%
 
 
 ```
+
+```{r}
+best_adult_walleye_year <- adult_wae %>%
+  mutate(hotspot = ifelse(cpue > 12.8, 1, 0)) %>%
+  #mutate(hotspot = as.factor(hotspot)) %>%
+  dplyr::select(lake_id, lake_name.1, x, y, cpue, count, year, julian_day, hotspot)
+
+best_adult_walleye_year %>% ggplot() +
+  geom_point(aes(x = year, y = log(cpue), color = hotspot))
+
+temp <- best_adult_walleye_year %>% group_by(lake_id) %>% summarize(n = sum(hotspot)) %>%
+  filter(n>0) %>%
+  sample_frac(.025)
+
+best_adult_walleye_year %>% filter(lake_id %in% temp$lake_id) %>%
+  ggplot(aes(x = year, y = cpue, color = as.factor(lake_name.1))) +
+  geom_point(aes(size = hotspot)) +
+  geom_line() +
+  geom_hline(yintercept = 12.8) +
+  theme(legend.position = "none")
+ggsave("./figures/brightspots.time.jpeg")
+
+most_surveyed = slice_max(best_adult_walleye, n, n = 5)
+adult_wae %>% dplyr::filter(lake_id %in% most_surveyed$lake_id) %>%
+  mutate(hotspot = ifelse(cpue > 12.8, 1, 0)) %>%
+  ggplot(aes(x = year, y = log(cpue), color = as.factor(lake_name.1))) +
+  geom_point(aes(size = hotspot)) +
+  geom_line() +
+  geom_hline(yintercept = log(12.8)) 
+ggsave("./figures/big_hotspots.time.jpeg")
+```
+
 
 # What are the best adult walleye catch lakes
 ```{r}

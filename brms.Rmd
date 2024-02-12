@@ -1,0 +1,211 @@
+---
+title: "brms"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(brms)
+library(sf)
+sf_use_s2(FALSE)
+options(scipen = 999)
+
+gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
+  mutate(BACI = as.factor(BACI),
+         STOCKED = as.factor(STOCKED),
+         STOCKED.previous = as.factor(STOCKED.previous), 
+         STOCKED.2.previous = as.factor(STOCKED.2.previous),
+         ice_off_date = lubridate::yday(ice_off_date),
+         ice_off_date.previous = lubridate::yday(ice_off_date.previous),
+         ice_off_date.2.previous = lubridate::yday(ice_off_date.2.previous),
+         log_cpue = log(cpue + 0.01), 
+         three_year_secchi = (median_secchi + median_secchi_previous +
+                                median_secchi_previous_2)/3)
+
+huc_8 <- st_read("./data/HUC8_CONUS/HUC8_US.shp")
+
+points_sf <- gn_temp_train  %>%
+  st_as_sf(coords = c(x = "x", y = "y"),
+           crs = 4326) %>% select(lake_id, geometry)
+
+temp <- st_join(points_sf, huc_8, join = st_intersects, left = T, largest = T) %>%
+  filter(!is.na(HUC8))
+
+temp <- temp %>% 
+  select(!c(geometry, Shape_Leng, Shape_Area, STATES, AREAACRES, GNIS_ID, 
+            LOADDATE, TNMID, METASOURCE, SOURCEDATA, SOURCEORIG, SOURCEFEAT)) %>% 
+  st_drop_geometry() %>% distinct(lake_id, .keep_all = T)
+
+few.lake.watershed <- temp %>% group_by(HUC8) %>% count() %>% filter(n < 6)
+
+gillnets <- merge(x = gn_temp_train, y = temp, all.x = T, by = "lake_id") %>%
+  dplyr::filter(!HUC8 %in%few.lake.watershed$HUC8)
+```
+
+
+```{r}
+abundance.model <- brms::brm(count ~ 
+                               s(year) + s(julian_day) + 
+                               s(log_acres) + s(max_depth) +
+                               s(gdd_wtr_0c) + s(peak_temp) + s(mean_surf_JulAugSep) +
+                               s(three_year_secchi) +
+                               #s(gdd_wtr_0c.previous) + s(peak_temp.previous) + s(mean_surf_JulAugSep.previous) +
+                               #s(gdd_wtr_0c.2.previous) + s(peak_temp.2.previous) + s(mean_surf_JulAugSep.2.previous) +
+                               offset(total_effort_1.1) + (1|lake_id) + (1|HUC8), 
+                             control = list(adapt_delta = 0.9),
+                             data = gillnets, family = negbinomial(),
+                             chains = 3, iter = 10000, warmup = 2000)
+#
+write_rds(abundance.model, "./models/huc8_abundance.rds")
+#abundance.model <- readRDS( "./models/huc8_abundance.rds")
+summary(abundance.model)
+conditional_effects(abundance.model, effects = "three_year_secchi")
+
+```
+
+
+```{r}
+pp_check(abundance.model)
+plot(abundance.model)
+pp_check(abundance.model, type='stat', stat='mean')
+pp_check(abundance.model, type='error_scatter_avg')
+
+fitted_values <- fitted(abundance.model)
+head(fitted_values)
+
+## plot expected predictions against actual response
+dat <- as.data.frame(cbind(Y = standata(abundance.model)$Y, fitted_values))
+ggplot(dat) + geom_point(aes(x = log(Estimate), y = Y)) 
+
+
+mean(fitted_values[,1] > standata(abundance.model)$Y) # bayes p-value
+
+bayes_R2(abundance.model)
+```
+
+# Bright spots
+```{r}
+merge_tbl <- gillnets %>% group_by(lake_id) %>% 
+  distinct(lake_id, .keep_all = T) %>% select(lake_id, HUC8, x, y)
+
+
+merge_tbl %>% group_by(HUC8) %>% count() %>% filter(n<3)
+
+
+n.huc8 <- length(unique(gillnets$HUC8))
+huc8 <- unique(gillnets$HUC8)
+
+
+huc.posterior <- posterior_samples(abundance.model, variable = "^r_") %>%
+  dplyr::select(contains("r_HUC"))  
+
+names.huc = sapply(strsplit(colnames(huc.posterior), split='[', fixed=TRUE), function(x) (x[2]))
+names.huc = sapply(strsplit(names.huc, split=',', fixed=TRUE), function(x) (x[1]))
+colnames(huc.posterior) = str_c(names.huc)
+
+
+
+lake.posterior <- posterior_samples(abundance.model, variable = "^r_") %>%
+  dplyr::select(contains("r_lake"))  
+
+names.lake = sapply(strsplit(colnames(lake.posterior), split='[', fixed=TRUE), function(x) (x[2]))
+names.lake = sapply(strsplit(names.lake, split=',', fixed=TRUE), function(x) (x[1]))
+colnames(lake.posterior) = names.lake
+
+huc.posterior <- huc.posterior %>% 
+  pivot_longer(everything(), names_to = "HUC8", values_to = "HUC8_posterior")
+
+lake.posterior <- lake.posterior %>% 
+  pivot_longer(everything(), names_to = "lake_id", values_to = "lake_posterior")
+
+posterior.full = data.frame(lake_id = character(0), huc8 = character(0), 
+                            mean_diff = numeric(0), mean_lake = numeric(0), mean_HUC8 = numeric(0))
+
+for (i in 1:length(names.lake)) {
+  lake = lake.posterior %>% 
+    dplyr::filter(lake_id == names.lake[i]) %>% merge(merge_tbl, by = "lake_id") 
+  huc = huc.posterior %>% 
+    dplyr::filter(HUC8 == lake$HUC8[1]) %>% select(HUC8_posterior)
+  
+  posterior <- cbind(lake, huc)
+  
+  posterior.temp <- 
+    posterior %>% mutate(diff = HUC8_posterior - lake_posterior) %>% 
+    summarise(
+      lake_id = unique(lake_id),
+      huc8 = unique(HUC8),
+      mean_diff = mean(diff),
+      mean_lake = mean(lake_posterior), 
+      mean_HUC8 = mean(HUC8_posterior))
+  posterior.full <- rbind(posterior.full, posterior.temp)
+}
+
+sd.higher <- mean(posterior.full$mean_diff) + 2*sd(posterior.full$mean_diff)
+sd.lower <- mean(posterior.full$mean_diff) - 2*sd(posterior.full$mean_diff)
+
+bs <- posterior.full %>% 
+  mutate(
+    brightspot = ifelse(mean_diff < sd.lower, "Bright Spot", NA),
+    brightspot = ifelse(mean_diff > sd.higher, "Dark Spot", brightspot),
+    brightspot = ifelse(is.na(brightspot), "Average", brightspot))
+
+table(bs$brightspot)
+
+bs.geo <- merge(bs, merge_tbl, by = "lake_id") 
+
+```
+
+
+
+```{r}
+summarized = gillnets %>% group_by(lake_id, lake_name.1) %>% summarize(mean.gn = mean(cpue))
+
+
+bs.geo <- bs.geo %>% mutate(size = ifelse(brightspot == "Average", T, F)) %>% 
+  merge(summarized, by = "lake_id")
+
+group.colors <- c(`Dark Spot` = "black", `Average` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+bs.geo %>% ggplot() +
+  geom_point(aes(
+    y = mean_diff, x = mean.gn, 
+    color = brightspot, alpha = size, size = size)) +
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  labs(title = "Gill net",
+       subtitle = "",
+       x = "Gill net CPUE", y = "Deviation from expected", 
+       color = "Spots")
+
+
+mn_counties <- map_data("state", "Minnesota")
+
+group.colors <- c(`Dark Spot` = "black", `Average` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = bs.geo, 
+             aes(x=x, y=y, color = brightspot, alpha = size, size = size)) + 
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "Gill net",
+       #subtitle = "1356 Lakes, 564 Bright Spots, 50 Dark spots",
+       x = "Longitude", y = "Latitude", color = "Spots") 
+#ggsave("./figures/gillnet_brightspots.jpeg")
+```
+
