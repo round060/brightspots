@@ -9,12 +9,9 @@ output: html_document
 library(tidyverse)
 library(mnsentinellakes)
 library(arrow)
-library(lme4)
 library(sf)
 library(mgcv)
-library(rfUtilities)
-library(pdp)
-library(randomForest)
+
 source("rf_functions.r")
 
 mn_lakes <- readRDS("./data/covariate/mndow_lakes_sf_allDataUntransformed.rds")
@@ -27,6 +24,7 @@ efish_wae <- read.csv("./data/Kundel_EF_DATA_Final.csv") %>%
   
 ```
 
+Weird things happening, Lake koronis has different data then what is on lakefinder
 
 # Get new EF surveys
 ```{r}
@@ -38,7 +36,7 @@ recent_surveys = mn_data %>%
   dplyr::filter(year > 2019) %>%
   dplyr::filter(month(lubridate_date_clean) >= 8) %>%
   dplyr::filter(total_effort_1.1 > 0.5) %>%
-  dplyr::filter(!str_detect(target_species, "bass|carp|perch")) %>%
+  dplyr::filter(!str_detect(target_species, "bass|carp|perch|bluegill|muskellunge")) %>%
   distinct(lake_id, nhdhr.id,lake_name.1, date_clean, year, 
            total_effort_1.1, effort_ident) %>%
   #dplyr::filter(young_of_year == "Y") %>%
@@ -78,6 +76,29 @@ new_ef_dows <- unique(new_surveys$lake_id)
 
 rm(zero_catch); rm(new_efishing); rm(recent_efishing)
 ```
+
+
+# Ateempting to work on recruitment problems
+```{r}
+
+
+temp_e = mn_data %>% 
+  filter(sampling_method_abbrev %in% c("EW", "EF", "SEF")) %>%
+  mutate(lubridate_date_clean = lubridate::as_date(date_clean),
+         year = year(lubridate_date_clean), month = lubridate::month(lubridate_date_clean)) %>%
+  dplyr::filter(!str_detect(target_species, "bass|carp|perch|bluegill|muskellunge|catfish|crappie|sturgeon")) %>%
+  dplyr::filter(total_effort_1.1 > 0.5) %>%
+  collect() %>%
+  dplyr::filter(species.1 == "walleye") %>%
+  dplyr::filter(young_of_year == "Y") %>%
+  group_by(lake_id, lake_name.1, nhdhr.id, effort_ident, date_clean, year, total_effort_1.1) %>%
+  summarize(catch = n()) %>% mutate(cpue = catch/total_effort_1.1)
+
+
+
+```
+
+
 
 # Get lake attributes for the new surveys
 ```{r}
@@ -250,7 +271,7 @@ surveys_stocking <- merge(x = surveys.ef, y = stocking,
 rm(new_surveys); rm(new_surveys_ais); rm(new_surveys_spatial); rm(new_surveys_stocking)
 rm(recent_surveys); rm(ais); rm(stocking); rm(mn_lakes);rm(efish_wae); rm(efish_merge);
 rm(secchi.full); rm(secchi); rm(surveys.ef)
-rm(new_surveys_merge); rm(new_surveys_secchi); 
+rm(new_surveys_merge); rm(new_surveys_secchi); rm(nhd.id)
 ```
 
 
@@ -289,12 +310,9 @@ rm(surveys_no_temp); rm(dow_nhdhr); rm(dow_year); rm(surveys.ef);
 rm(mn_lakes_ef)
 ```
 
-
+# Final Fixes before CSVing
 ```{r}
-three.years <- surveys_ef %>% group_by(lake_id) %>% count() %>% filter(n >= 3)
-
 model_surveys_ef <- surveys_ef %>% 
-  dplyr::filter(lake_id %in% three.years$lake_id) %>% 
   mutate(yrl.pa = ifelse(is.na(yrl.pa), 0, yrl.pa),
          log_acres = log(acres),
          log_shore = log(shore_mi),
@@ -311,11 +329,107 @@ model_surveys_ef <- surveys_ef %>%
 
 
 yoy_ef <- model_surveys_ef %>%
-  select(!c(site_id, catch, total_effort_1.1, acres, shore_mi,
+  select(!c(site_id, acres, shore_mi,
             infested, year_confirmed, fgl.pa, adl.pa, yrl.pa, frl.pa))
 
 #write.csv(yoy_ef, "./data/yoy_catch_data.csv", row.names = F)
 ```
+
+
+# Wae recruitment ICE
+## Uses non lake specific ice off anomalys (only year specific)
+```{r}
+library(gratia)
+
+ice_off <- read.csv("./data/ice_off_summarized.csv")
+marta <- read.csv("./data/Barta_et_al_LOL_Phenology_Data.csv") %>%
+  mutate(iceoffmodel_jday = lubridate::yday(Model_IceOffDate),
+         iceoffobserved = lubridate::yday(LIAG_IceOffDate))
+
+efish_wae_ice <- surveys_ef %>%
+  dplyr::select(year, lake_id, catch, total_effort_1.1, x, y, acres) %>%
+  rename(DOW = lake_id) %>%
+  mutate(cpue = catch/total_effort_1.1)
+  
+long_term <- ice_off %>% group_by(DOW) %>% count() %>% filter(n >= 100) #%>% filter(DOW == "77021500")
+
+# Calulate average ice off long term
+average <- ice_off %>% dplyr::filter(DOW %in% long_term$DOW) %>% 
+  filter(year < 1980) %>%
+  group_by(DOW) %>% summarise(mean_ice_off = mean(min_ice_off_julian))
+
+anomaly <- average %>% merge(ice_off, by = "DOW") %>% filter(year > 1980) %>%
+  mutate(anomaly = mean_ice_off - min_ice_off_julian) %>%
+  group_by(year) %>%
+  summarize(average_anomaly = mean(anomaly), 
+            sd_anomaly = sd(anomaly))
+
+plot(y = anomaly$average_anomaly, x = anomaly$year)
+mean(anomaly$average_anomaly)
+  
+efish_ice_anomaly <- merge(efish_wae_ice, anomaly, by = c("year")) %>%
+  mutate(DOW = as.factor(DOW),
+         year_f = as.factor(year),
+         average_anomaly_abs = abs(average_anomaly))
+
+five.years <- efish_ice_anomaly %>% group_by(DOW) %>% count() %>% dplyr::filter(n >= 5)
+efish_ice_10 <- efish_ice_anomaly %>% dplyr::filter(DOW %in% five.years$DOW)
+
+
+efish_ice_10 %>% 
+  ggplot(aes(y = sqrt(cpue), x = average_anomaly)) +
+  geom_point() +
+  geom_smooth(aes(y = sqrt(cpue), x = average_anomaly), method = "gam") #+ 
+  ylim(c(0,100))
+
+
+gam.ice <- gam(catch ~ s(average_anomaly) + acres + s(x,y) + s(DOW, bs = "re") + 
+                 s(year_f, bs = "re") + offset(log(total_effort_1.1)), 
+               method = "REML",
+               family = nb(),
+               data = efish_ice_anomaly)
+gratia::draw(gam.ice)
+summary(gam.ice)
+
+k.check(gam.ice)
+
+
+sm <- smooth_estimates(gam.ice)
+jd_smooth <- sm %>%
+  filter(smooth == "s(average_anomaly)" ) %>%
+  add_confint() %>%
+  add_constant(coef(gam.ice)["(Intercept)"]) %>% 
+  mutate(upper_ci = upper_ci + coef(gam.ice)["(Intercept)"],
+         lower_ci = lower_ci + coef(gam.ice)["(Intercept)"]) %>%
+  transform_fun(inv_link(gam.ice))
+  
+
+efish_ice_residuals <- efish_ice_anomaly %>% add_partial_residuals(gam.ice) %>%
+  add_constant(coef(gam.ice)["(Intercept)"], column = 13) %>%
+  transform_fun(inv_link(gam.ice), 13)
+
+
+jd_smooth %>%
+  ggplot(aes(x = average_anomaly, y = est)) +
+  geom_point(aes(x = average_anomaly, y = `s(average_anomaly)`), 
+             alpha = 0.2, data = efish_ice_residuals) +
+  geom_line(lwd = 1.5) +
+  geom_ribbon(aes(ymin = lower_ci , ymax = upper_ci), alpha = 0.2) + 
+  labs(y = "Fall Age-0 Walleye Catch", x = "Ice-Off Anomaly") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 80)) + 
+  theme_classic() +
+  theme(axis.text = element_text(size = 18),
+        axis.title = element_text(size = 24))
+ggsave("./figures_ice_recruitment/yoy_recruitment_anomaly.jpeg", height = 10, width = 15)
+
+marta %>% 
+  mutate(diff.ice = iceoffmodel_jday-iceoffobserved) %>%
+  filter(!is.na(diff.ice)) %>%
+  ggplot(aes(x = Year, y = diff.ice)) + 
+  geom_point() + 
+  geom_smooth()
+```
+
 
 
 # Wae recruitment ICE
@@ -325,28 +439,63 @@ efish_wae_ice <- surveys_ef %>%
   rename(DOW = lake_id) %>%
   mutate(cpue = catch/total_effort_1.1)
   
+long_term <- ice_off %>% group_by(DOW) %>% count() %>% filter(n >= 10) 
 
-mean_ice <- ice_off %>% group_by(DOW) %>% summarise(mean_ice_off = mean(min_ice_off_julian))
+# Calulate average ice off long term
+average <- ice_off %>% dplyr::filter(DOW %in% long_term$DOW) %>% 
+  filter(year < 1980) %>%
+  group_by(DOW) %>% summarise(mean_ice_off = mean(min_ice_off_julian))
 
-efish_ice <- merge(efish_wae_ice, ice_off, by = c("year", "DOW"))
+anomaly <- average %>% merge(ice_off, by = "DOW") %>% filter(year > 1980) %>%
+  mutate(anomaly = mean_ice_off - min_ice_off_julian) #%>%
+  group_by(year) %>%
+  summarize(average_anomaly = mean(anomaly), 
+            sd_anomaly = sd(anomaly))
 
-efish_ice_anomaly <- merge(efish_ice, mean_ice, by = c("DOW")) %>%
-  mutate(ice_off_anomaly = min_ice_off_julian - mean_ice_off,
-         DOW = as.factor(DOW),
-         year_f = as.factor(year))
+plot(y = anomaly$average_anomaly, x = anomaly$year)
+mean(anomaly$average_anomaly)
+  
+efish_ice_anomaly <- merge(efish_wae_ice, anomaly, by = c("year", "DOW")) %>%
+  mutate(DOW = as.factor(DOW),
+         year_f = as.factor(year),
+         anomaly_abs = abs(anomaly))
 
-five.years <- efish_ice_anomaly %>% group_by(DOW) %>% count() %>% dplyr::filter(n >= 10)
-efish_ice_anomaly <- efish_ice_anomaly %>% dplyr::filter(DOW %in% five.years$DOW)
+five.years <- efish_ice_anomaly %>% group_by(DOW) %>% count() %>% dplyr::filter(n >= 5)
+efish_ice_10 <- efish_ice_anomaly %>% dplyr::filter(DOW %in% five.years$DOW)
 
-efish_ice_anomaly %>% 
-  ggplot(aes(y = cpue, x = ice_off_anomaly)) +
+
+efish_ice_10 %>% 
+  ggplot(aes(y = sqrt(cpue), x = anomaly_abs)) +
   geom_point() +
-  geom_smooth(aes(y = cpue, x = ice_off_anomaly), method = "lm") #+ 
+  geom_smooth(aes(y = sqrt(cpue), x = anomaly_abs), method = "lm") #+ 
   ylim(c(0,100))
 
 
-gam.ice <- gam(cpue ~ s(ice_off_anomaly) + acres + s(x,y) + s(DOW, bs = "re") + 
-                 s(year_f, bs = "re"), data = efish_ice_anomaly)
+gam.ice <- gam(catch ~ s(anomaly_abs) + acres + s(x,y) + s(DOW, bs = "re") + 
+                 s(year_f, bs = "re") + offset(log(total_effort_1.1)), 
+               family = nb(),
+               data = efish_ice_10)
 gratia::draw(gam.ice)
 summary(gam.ice)
+
+k.check(gam.ice)
+
+
+sm <- smooth_estimates(gam.ice)
+sm <- sm %>%
+  add_constant(coef(gam.ice)["(Intercept)"]) %>% 
+  transform_fun(inv_link(gam.ice)) %>% 
+  add_confint()
+
+efish_ice_residuals <- efish_ice_anomaly %>% add_partial_residuals(gam.ice) %>%
+  add_constant(coef(gam.ice)["(Intercept)"], column = 13) %>%
+  transform_fun(inv_link(gam.ice), 13)
+
+
+sm %>% filter(smooth == "s(average_anomaly)" ) %>%
+  ggplot(aes(x = average_anomaly, y = est)) +
+  geom_point(aes(x = average_anomaly, y = `s(average_anomaly)`), data = efish_ice_residuals) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower_ci , ymax =upper_ci), alpha = 0.2) + 
+  ylim(c(0, 100))
 ```

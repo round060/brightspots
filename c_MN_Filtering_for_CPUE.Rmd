@@ -131,6 +131,9 @@ temp_wae <- adult_walleye_cpue %>%
   
 #write.csv(temp_wae, "./data/clean_data/wae_cpue.csv", row.names = F)
 rm(adult_walleye); rm(adult_walleye_cpue)
+
+
+years20 = temp_wae %>% group_by(lake_id) %>% count() %>% filter(n>14)
 ```
 
 #black crappie filtering

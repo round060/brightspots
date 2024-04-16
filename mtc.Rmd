@@ -1,0 +1,195 @@
+---
+title: "MTC"
+author: "Christopher Rounds"
+date: "3/28/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(arrow)
+library(mgcv)
+library(gratia)
+library(itsadug)
+
+fish_temp <- read.csv("./data/fish_temperature.csv") %>%
+  rename(species.1 = species_clean)
+mn_data <- open_dataset("./data/mn_file_arrow/")
+#glimpse(mn_data)
+```
+
+
+# Only Use Catch (No Biomass)
+## Make Gears paired over time (GN- TN)
+```{r}
+gn_tn <- mn_data %>% 
+  filter(sampling_method_abbrev %in% c("GN", "TN")) %>%
+  distinct(lake_id, sampling_method_abbrev, effort_ident, date_clean) %>%
+  collect() %>%
+  mutate(year = lubridate::year(date_clean))
+
+
+dup <- gn_tn %>%
+  dplyr::group_by(lake_id,  year, sampling_method_abbrev) %>%
+  dplyr::summarise(n = dplyr::n()) %>%
+  dplyr::filter(n > 1L) %>%
+  mutate(row_id = str_c(sampling_method_abbrev, lake_id, year))
+
+# Lakes weirdly sampled a lot in the 80s
+## 86014600, 86019300, 86023400
+
+surveys <- gn_tn %>% 
+  mutate(row_id = str_c(sampling_method_abbrev, lake_id, year)) %>%
+  dplyr::filter(!row_id %in% dup$row_id) %>% 
+  dplyr::select(!row_id) %>%
+  group_by(lake_id, year) %>%
+  pivot_wider(names_from = sampling_method_abbrev, values_from = effort_ident) %>%
+  dplyr::filter(!is.na(TN)) %>%
+  dplyr::filter(!is.na(GN)) %>%
+  pivot_longer(cols = c("TN", "GN"), names_to = "sampling_method_abbrev", values_to = "effort_ident")
+
+length(unique(surveys$lake_id))
+(nrow(surveys))/2
+
+long_surveys <- surveys %>% group_by(lake_id) %>%
+  summarize(n = n()) %>% 
+  filter(n > 20)
+  #slice_max(n = 10, order_by = n)
+
+data <- mn_data %>% 
+  filter(lake_id == 8002600) %>%
+  collect() %>%
+  distinct(effort_ident, .keep_all = T) %>%
+  filter(sampling_method_abbrev %in% c("GN", "TN"))
+```
+
+
+# Define MTC calulation function
+```{r}
+calculate_mtc = function(id_code, inclusion_percent = 0.005){
+  
+  # filter lake from big data, make sure only surveys from "good surveys" are in the data set
+  temp <- mn_data %>%
+    filter(sampling_method_abbrev %in% c("GN", "TN")) %>%
+    filter(lake_id == id_code) %>%
+    collect() %>%
+    mutate(year = lubridate::year(date_clean)) %>%
+    dplyr::filter(effort_ident %in% surveys$effort_ident)
+  
+  # calculate what species are most sampled
+  most_species <- temp %>% group_by(species.1) %>% count() %>% 
+    filter(n > nrow(temp)*inclusion_percent) 
+  
+  #filter to only those species
+  paired <- temp %>% filter(species.1 %in% most_species$species.1)
+  
+  # join surveys with fish-temps
+  paired_temps <- merge(paired, fish_temp, by = c("species.1")) %>%
+    select(lake_id, lake_name.1, year, survey_type.1, sampling_method, 
+           sampling_method_abbrev, effort_ident, total_effort_1.1, 
+           date_clean, species.1, length.1, weight.1, FTP, OGT, Ctmax)
+  
+  summarized = paired_temps %>% group_by(lake_id, year, species.1) %>%
+    summarize(catch = n()) %>%
+    merge(fish_temp, by = c("species.1")) %>%
+    select(lake_id, year, species.1, catch, FTP, OGT, Ctmax) %>%
+    mutate(FTP.catch.species = FTP*catch,
+           OGT.catch.species = OGT*catch,
+           CTmax.catch.species = Ctmax*catch) 
+  
+  # Do MTC calculations 
+  mtc <- summarized %>%
+    group_by(year, lake_id) %>%
+    summarize(FTP.catch = sum(FTP.catch.species), 
+              OGT.catch = sum(OGT.catch.species),
+              CTmax.catch = sum(CTmax.catch.species),
+              total_catch = sum(catch)) %>%
+    mutate(mtc.ftp = FTP.catch/total_catch, 
+           mtc.ogt = OGT.catch/total_catch,
+           mtc.CTmax = CTmax.catch/total_catch) %>%
+    select(year, lake_id, mtc.ftp, mtc.ogt)
+  #return(most_species$species.1)
+  return(mtc)
+}
+  
+#with(mtc, plot(y = mtc.ftp, x = year))
+
+```
+
+# check species
+```{r, message=FALSE, warning=F, eval = F}
+species = data.frame(fish = character(0), lake = numeric(0))
+
+for (i in 1:nrow(long_surveys)){
+  lake = long_surveys$lake_id[i]
+  lake_fish <- calculate_mtc(lake)
+  
+  temp = data.frame(fish = lake_fish, lake = lake)
+  species = rbind(species, temp)
+}
+
+unique(species$fish)
+```
+
+
+# Actually Run MTC
+```{r, message=FALSE, warning=F}
+big_mtc <- data.frame(year = numeric(0), lake_id = numeric(0),
+           mtc.ftp = numeric(0), mtc.ogt = numeric(0))
+
+
+for (i in 1:nrow(long_surveys)) {
+  lake = long_surveys$lake_id[i]
+  lake_mtc <- calculate_mtc(lake)
+  big_mtc = rbind(big_mtc, lake_mtc)
+}
+big_mtc <- big_mtc %>% mutate(lake_id = as.factor(lake_id)) %>% ungroup() %>%
+  as.data.frame()
+
+big_mtc %>%
+  mutate(lake_id = as.factor(lake_id)) %>%
+  ggplot(aes(x = year, y = mtc.ftp)) +
+  geom_point(aes(x = year, y = mtc.ogt, color = lake_id)) +
+  geom_smooth(method = "gam", se = T) + 
+  theme(legend.position = "none") 
+```
+
+
+```{r}
+gam <- bam(mtc.ftp ~ s(year) + 
+             s(lake_id, bs = "re") + 
+             s(year, by = lake_id), 
+           data = big_mtc, method = "fREML", select = TRUE)
+summary(gam)
+#plot(gam)
+
+
+mod.example <- summary(gam)
+
+df_example <- data.frame( edf = mod.example$edf[3:(3 + length(unique(big_mtc$lake_id))-1)], ID = sort(unique(big_mtc$lake_id)))
+df_example <- arrange(df_example, edf)
+df_example$Different <- NA
+df_example$Different[df_example$edf <= .1] <- "No difference"
+df_example$Different[df_example$edf > .1 & df_example$edf < 1] <- "Slightly Different"
+df_example$Different[df_example$edf >= 1] <- "Different"
+```
+
+
+
+```{r}
+plot_smooth(gam, view = "year", rm.ranef = T, col='blue') 
+plot_smooth(gam, view = "year", cond=list(lake_id="69043100"), rm.ranef = F, col='blue') 
+plot_smooth(gam, view = "year", cond=list(lake_id="7004400"), rm.ranef = F, col='blue') 
+plot_smooth(gam, view = "year", cond=list(lake_id="1016100"), rm.ranef = F, col='blue') 
+plot_smooth(gam, view = "year", cond=list(lake_id="82004600"), rm.ranef = F, col='blue') 
+plot_smooth(gam, view = "year", cond=list(lake_id="62000700"), rm.ranef = F, col='blue') 
+
+
+#appraise(gam)
+k.check(gam)
+#edf = as.data.frame(gam$edf)
+```
+
+
+
+

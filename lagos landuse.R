@@ -151,7 +151,7 @@ write.csv(watershed, "lagos_watershed_lulc.csv", row.names = FALSE)'
 
 shoreline=filter(dt10, spatial_division=="buff100")
 head(shoreline)
-write.csv(shoreline, "lagos_shoreline_lulc.csv", row.names = FALSE)
+write.csv(shoreline, "./data/lagos_shoreline_lulc.csv", row.names = FALSE)
 
 
 

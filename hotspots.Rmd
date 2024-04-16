@@ -36,13 +36,41 @@ best_adult_walleye <- adult_wae %>%
             lat = unique(y),
             long = unique(x)) %>%
   #dplyr::filter(n > 2) %>%
-  filter(mean_CPUE > 0) %>%
+  #filter(mean_CPUE > 0) %>%
   ungroup() %>% 
   slice_max(mean_CPUE, n = 71) %>%
   dplyr::select(!lake_name.1)
 
 
 ```
+
+```{r}
+mn_counties <- map_data("state", "Minnesota")
+
+adult_wae %>% 
+  group_by(lake_id) %>%
+  summarise(mean_CPUE = mean(cpue),
+            lat = unique(y),
+            long = unique(x)) %>%
+  mutate(sqrt_cpue = sqrt(mean_CPUE)) %>%
+  ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(aes(x = long, y = lat, size = mean_CPUE), pch = 21, alpha = 0.75, color = "black", fill = "grey") +
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), legend.position = "none") + 
+  labs(
+       x = "Longitude", y = "Latitude")
+ggsave("./figures/mean_abundance_gn.jpeg", width = 7, height = 7)
+```
+
 
 ```{r}
 best_adult_walleye_year <- adult_wae %>%
@@ -76,7 +104,7 @@ ggsave("./figures/big_hotspots.time.jpeg")
 ```
 
 
-# What are the best adult walleye catch lakes
+# What are the best adult walleye size lakes
 ```{r}
 size_wae <- read.csv("./data/adult_size_data.csv")
 

@@ -1,0 +1,438 @@
+---
+title: "brms_recruitment"
+output: html_document
+---
+
+```{r setup}
+library(tidyverse)
+library(brms)
+library(sf)
+library(gt)
+library(tidybayes)
+library(cowplot)
+sf_use_s2(FALSE)
+options(scipen = 999)
+
+# read in YOY data
+yoy <- read.csv("./data/yoy_catch_data.csv")
+gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>% group_by(lake_id, lake_name.1) %>% summarize()
+
+# Add lake names to YOY data
+yoy_catch <- merge(x = yoy, y = gn_temp_train, by = "lake_id", all.x = T) %>%
+  mutate(log_acres_s = scale(log_acres),
+         gdd_wtr_0c_s = scale(gdd_wtr_0c),
+         peak_temp_s = scale(peak_temp),
+         mean_surf_JulAugSep_s = scale(mean_surf_JulAugSep),
+         post_ice_warm_rate_s = scale(post_ice_warm_rate),
+         median_secchi_s = scale(median_secchi),
+         year_s = scale(year),
+         julian_day_s = scale(julian_day)
+         )
+
+# Read in buffered land use
+idtable <- mwlaxeref::lake_id_xref
+shoreline <- read.csv("./data/lagos_shoreline_lulc.csv") %>% 
+  rename(lagos.id = zoneid) %>% 
+  merge(idtable, by = "lagos.id") %>% rename(lake_id = local.id) %>% 
+  filter(lake_id %in% yoy_catch$lake_id) %>%
+  dplyr::select(!c(spatial_division, precision, state, agency)) %>%
+  mutate(forest = 
+           nlcd_forcon42_pct + nlcd_fordec41_pct + nlcd_formix43_pct, 
+         wet = 
+           nlcd_openwater11_pct + nlcd_wetemerg95_pct + nlcd_wetwood90_pct,
+         crop = nlcd_cultcrop82_pct + nlcd_past81_pct, 
+         developed = 
+           nlcd_devhi24_pct + nlcd_devmed23_pct + nlcd_devlow22_pct) %>%
+  group_by(lake_id) %>% 
+  summarize(developed = mean(developed), forest = mean(forest),
+            wet = mean(wet), crop = mean(crop))
+
+rm(yoy); rm(gn_temp_train)
+
+
+yoy %>% group_by(lake_id) %>% count() %>% filter(n >= 15)
+```
+
+# YOY model
+```{r}
+yoy.model <-  brms::brm(catch ~ 
+                               s(year_s) + s(julian_day_s) + 
+                               s(log_acres_s, k = 3) +
+                               s(gdd_wtr_0c_s) + 
+                               s(peak_temp_s) + 
+                               s(mean_surf_JulAugSep_s) +
+                               s(post_ice_warm_rate_s) +
+                               s(median_secchi_s) + 
+                               s(x,y) +
+                               offset(log(total_effort_1.1)) + 
+                               (1|lake_id), 
+                             control = list(adapt_delta = 0.95),
+                             data = yoy_catch, family = negbinomial(),
+                             chains = 3, iter = 10000, warmup = 2000)
+#write_rds(yoy.model, "./models/Huc8_yoy_model.rds")
+#yoy.model <- readRDS("./models/Huc8_yoy_model.rds")
+
+yoy.model <-  brms::brm(catch ~ 
+                               s(year) + s(julian_day) + 
+                               s(log_acres, k = 3) +
+                               s(gdd_wtr_0c) + 
+                               s(peak_temp) + 
+                               s(mean_surf_JulAugSep) +
+                               s(post_ice_warm_rate) +
+                               s(median_secchi) + 
+                               s(x,y) +
+                               offset(log(total_effort_1.1)) + 
+                               (1|lake_id), 
+                             control = list(adapt_delta = 0.95),
+                             data = yoy_catch, family = negbinomial(),
+                             chains = 3, iter = 10000, warmup = 2000)
+#write_rds(yoy.model, "./models/yoy_model.rds")
+yoy.model <- readRDS("./models/yoy_model.rds")
+```
+
+
+# Diagnostics
+```{r}
+pp_check(yoy.model)
+plot(yoy.model)
+pp_check(yoy.model, type='stat', stat='mean')
+pp_check(yoy.model, type='error_scatter_avg')
+
+fitted_values <- fitted(yoy.model)
+head(fitted_values)
+
+## plot expected predictions against actual response
+dat <- as.data.frame(cbind(Y = standata(yoy.model)$Y, fitted_values))
+ggplot(dat) + geom_point(aes(x = Estimate, y = Y))  + geom_abline()
+
+
+mean(fitted_values[,1] > standata(yoy.model)$Y) # bayes p-value
+
+bayes_R2(yoy.model)
+```
+
+# Plotting and what-not
+```{r}
+conditional_effects(yoy.model)
+summary(yoy.model)
+```
+
+
+
+# Identify bright spots based on lake
+```{r}
+merge_tbl <- yoy_catch %>% group_by(lake_id) %>% 
+  distinct(lake_id, .keep_all = T) %>% select(lake_id, lake_name.1, x, y)
+
+lake.effects = ranef(yoy.model)$lake_id
+lake.effects <- as.data.frame(lake.effects)
+
+lake.re <- yoy.model %>%
+  spread_draws(r_lake_id[lake_id,]) %>% ggdist::median_hdci()
+
+bs <- lake.re %>%
+  mutate(brightspot = ifelse(.lower > 0, "Bright Spot", "Spot"),
+         brightspot = ifelse(.upper < 0, "Dark Spot", brightspot))
+
+bs.geo <- merge(bs, merge_tbl, by = "lake_id") 
+
+sum(bs.geo$brightspot == "Bright Spot")
+sum(bs.geo$brightspot == "Dark Spot")
+```
+
+# Visualize RE
+```{r}
+dow_plot <- sample_n(yoy_catch, 100)
+
+ REs <- yoy.model %>%
+  spread_draws(b_Intercept, r_lake_id[lake_id,]) %>%
+  # add the grand mean to the group-specific deviations
+  mutate(mu = b_Intercept + r_lake_id) %>%
+  ungroup() %>%
+  dplyr::filter(lake_id %in% dow_plot$lake_id)
+  # plot
+
+dotplot <- merge(REs, bs.geo, all.x = T, by = "lake_id") 
+
+dotplot %>%
+  ggplot(aes(x = mu, y = reorder(lake_id, mu), color = brightspot)) +
+  geom_vline(xintercept = fixef(yoy.model)[1, 1], color = "#839496", size = 1) +
+  geom_vline(xintercept = fixef(yoy.model)[1, 3:4], color = "#839496", linetype = 2) +
+  stat_halfeye(.width = .5, size = 2/3) +
+  scale_color_manual(values = c("yellow", "black", "white")) +
+  labs(x = expression(""),
+       y = "",  color = "Spots") +
+  theme(panel.grid = element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y = element_blank()) 
+ggsave("./figures/dotplot_yoy.jpeg")
+  
+
+```
+
+
+# Visualize Bright spots Lake RE
+```{r}
+summarized = yoy_catch %>% group_by(lake_id) %>% 
+  summarize(mean.gn = mean(cpue))
+
+
+bs.geo <- bs.geo %>% mutate(size = ifelse(brightspot == "Spot", T, F)) %>% 
+  merge(summarized, by = "lake_id")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+bs.geo %>% ggplot() +
+  geom_point(aes(
+    y = r_lake_id, x = mean.gn, 
+    color = brightspot, alpha = size, size = size)) +
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  labs(title = "Gill net",
+       subtitle = "",
+       x = "Gill net CPUE", y = "Deviation from expected", 
+       color = "Spots")
+#ggsave("./figures/deviation.jpeg")
+
+mn_counties <- map_data("state", "Minnesota")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  # color changes state outline, fill changes state fill
+  coord_fixed(1.3) +
+  geom_point(data = bs.geo, 
+             aes(x=x, y=y, fill = brightspot, shape = brightspot,
+                 alpha = size, size = size), color = "black") +
+  scale_shape_manual(values = c(21, 22, 23)) + 
+  scale_fill_manual(values = c("yellow", "black", "white")) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "",
+       #subtitle = "1356 Lakes, 564 Bright Spots, 50 Dark spots",
+       x = "Longitude", y = "Latitude", shape = "Spots", fill = "Spots") 
+ggsave("./figures/yoy_brightspots.jpeg", height = 7, width = 7)
+
+```
+
+
+# Actionable effects
+```{r}
+library(nnet)
+library(ggeffects)
+actionable <- yoy_catch %>% 
+  select(lake_id, year, contains("pa"), contains("stock"), BACI) %>%
+  mutate(zm  = ifelse(BACI %in% c(1,3,4), 0, 1),
+         zm = as.factor(zm),
+         BACI = as.factor(BACI))
+
+yoy_actionable.noland <- merge(x = bs.geo, y = actionable, 
+                            all.x = T,
+                            by = c("lake_id"))
+
+yoy_actionable <- merge(yoy_actionable.noland, shoreline, by = "lake_id") %>% 
+  mutate(brightspot = factor(brightspot, levels = c("Spot","Bright Spot", "Dark Spot")))
+
+
+actionable.model <- multinom(brightspot ~ zm + 
+                               fry.pa +
+                               developed + crop + forest + wet, 
+                             data = yoy_actionable)
+
+
+
+yoy_actionable %>% ggplot() +
+  geom_boxplot(aes(y = developed, x = as.factor(year), color = brightspot))
+
+summary(actionable.model)
+plogis(coef(actionable.model))
+
+broom::tidy(actionable.model, conf.int = T, exponentiate = TRUE) %>% knitr::kable()
+
+ggeffect(actionable.model) %>% plot()
+
+```
+
+# Plotting ZM and Stocking
+``` {r}
+pprob_zm <- ggeffect(actionable.model, terms = "zm") %>% dplyr::filter(response.level == "Bright.Spot")
+ggplot(data = pprob_zm,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Zebra Mussel Presence",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "bottom", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+ggsave("./figures/actionable_zm_yoy.jpeg", height = 6, width = 5)
+
+# Plot Stocking effect
+pprob_stock <- ggeffect(actionable.model, terms = "fry.pa") %>% dplyr::filter(response.level == "Bright.Spot")
+ggplot(data = pprob_stock ,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Fry Stocking/Acre",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+ggsave("./figures/actionable_stock_yoy.jpeg", height = 6, width = 5)
+
+```
+
+# Land use effect
+```{r }
+# Plot Stocking effect
+pprob_wet <- ggeffect(actionable.model, terms = "wet") %>% dplyr::filter(response.level == "Bright.Spot")
+wet <- ggplot(data = pprob_wet,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Wetland in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+
+# Plot Stocking effect
+pprob_forest <- ggeffect(actionable.model, terms = "forest") %>% dplyr::filter(response.level == "Bright.Spot")
+forest <- ggplot(data = pprob_forest,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Forest in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+# Plot Stocking effect- Crop
+pprob_crop <- ggeffect(actionable.model, terms = "crop") %>% dplyr::filter(response.level == "Bright.Spot")
+crop <- ggplot(data = pprob_crop,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Crop in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+# Plot Stocking effect- Developed
+pprob_developed <- ggeffect(actionable.model, terms = "developed") %>% dplyr::filter(response.level == "Bright.Spot")
+developed <- ggplot(data = pprob_developed,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Developed in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+
+plot_grid(wet, forest, crop, developed, labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2)
+ggsave("./figures/actionable_land_yoy.jpeg", height = 7, width = 10)
+```
+

@@ -18,8 +18,6 @@ library(randomForest)
 library(mwlaxeref)
 source("rf_functions.r")
 
-mn_data <- open_dataset("./data/mn_file_arrow/") 
-
 mn_lakes <- readRDS("./data/covariate/mndow_lakes_sf_allDataUntransformed.rds")
 
 adult_wae <- read.csv("./data/clean_data/wae_abundance.csv") %>% 
@@ -32,6 +30,8 @@ missing_ids <- data.frame(
                "nhdhr_72d19d48-754d-459b-a1f2-b1cfd8993b06", "nhdhr_80993749", 
                "nhdhr_120019082"))
 adult_wae = adult_wae %>% rows_update(y = missing_ids, by = c("lake_id"))
+
+adult_wae %>% group_by(lake_id) %>% count() %>% filter(n>15)
 ```
 
 https://www.sciencebase.gov/catalog/item/6206d3c2d34ec05caca53071
@@ -392,12 +392,17 @@ no_catch = gn_temp_train %>% group_by(lake_id) %>% summarise(mean_cpue = mean(cp
 # trout lakes
 ```{r}
 gn_temp_train <- gn_temp_train %>% 
-  dplyr::filter(!lake_id %in% c(11031200, 11029500, 11082600, 16029700, 16004900, 16008700, 
-                                16033600, 29012700, 29023700, 3017700, 16002400, 16003100, 16008500,
-                                16023400, 16052900, 16058300, 16063400, 38002000, 38006500, 38044000, 
-                                38073700, 69129500, 69006400, 38068800, 38061500, 38040900, 31044400, 
-                                16062700, 16045000, 16022500, 16019200, 16015000, 16001500, 15012700, 
-                                15009000))
+  # removes lakes managed for trout (will never have walleye)
+  dplyr::filter(!lake_id %in% 
+                  c(11031200, 11029500, 11082600, 16029700, 
+                    16004900, 16008700, 16033600, 29012700, 
+                    29023700, 3017700, 16002400, 16003100, 
+                    16008500, 16023400, 16052900, 16058300, 
+                    16063400, 38002000, 38006500, 38044000, 
+                    38073700, 69129500, 69006400, 38068800, 
+                    38061500, 38040900, 31044400, 16062700, 
+                    16045000, 16022500, 16019200, 16015000, 
+                    16001500, 15012700, 15009000))
 
 write.csv(gn_temp_train, "./data/adult_catch_data.csv", row.names = F)
 

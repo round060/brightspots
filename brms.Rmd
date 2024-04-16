@@ -7,6 +7,9 @@ output: html_document
 library(tidyverse)
 library(brms)
 library(sf)
+library(gt)
+library(tidybayes)
+library(doParallel)
 sf_use_s2(FALSE)
 options(scipen = 999)
 
@@ -19,9 +22,50 @@ gn_temp_train <- read.csv("./data/adult_catch_data.csv") %>%
          ice_off_date.previous = lubridate::yday(ice_off_date.previous),
          ice_off_date.2.previous = lubridate::yday(ice_off_date.2.previous),
          log_cpue = log(cpue + 0.01), 
+         max_depth_s = scale(max_depth),
+         log_acres_s = scale(log_acres),
+         year_s = scale(year),
+         julian_day_s = scale(julian_day),
          three_year_secchi = (median_secchi + median_secchi_previous +
-                                median_secchi_previous_2)/3)
+                                median_secchi_previous_2)/3,
+         three_year_secchi_s = scale(three_year_secchi),
+         three_year_gdd = (gdd_wtr_0c + gdd_wtr_0c.previous + 
+                             gdd_wtr_0c.2.previous)/3,
+         three_year_gdd_s = scale(three_year_gdd),
+         three_year_peaktemp = (peak_temp+ peak_temp.previous + 
+                                  peak_temp.2.previous)/3,
+         three_year_peaktemp_s = scale(three_year_peaktemp),
+         three_year_warmrate = (post_ice_warm_rate + post_ice_warm_rate.previous + 
+                                  post_ice_warm_rate.2.previous)/3,
+         three_year_warmrate_s = scale(three_year_warmrate),
+         three_year_julsep_surf = scale(mean_surf_JulAugSep +
+                                     mean_surf_JulAugSep.previous + 
+                                     mean_surf_JulAugSep.2.previous)/3,
+         three_year_julsep_surf_s = scale(three_year_julsep_surf)) %>%
+  na.omit()
 
+idtable <- mwlaxeref::lake_id_xref
+shoreline <- read.csv("./data/lagos_shoreline_lulc.csv") %>% 
+  rename(lagos.id = zoneid) %>% 
+  merge(idtable, by = "lagos.id") %>% rename(lake_id = local.id) %>% 
+  filter(lake_id %in% gn_temp_train$lake_id) %>%
+  dplyr::select(!c(spatial_division, precision, state, agency)) %>%
+  mutate(forest = 
+           nlcd_forcon42_pct + nlcd_fordec41_pct + nlcd_formix43_pct, 
+         wet = 
+           nlcd_openwater11_pct + nlcd_wetemerg95_pct + nlcd_wetwood90_pct,
+         crop = nlcd_cultcrop82_pct + nlcd_past81_pct, 
+         developed = 
+           nlcd_devhi24_pct + nlcd_devmed23_pct + nlcd_devlow22_pct) %>%
+  group_by(lake_id) %>% 
+  summarize(developed = mean(developed), forest = mean(forest),
+            wet = mean(wet), crop = mean(crop))
+
+
+```
+
+# add HUC8 to gill nets
+``` {r}
 huc_8 <- st_read("./data/HUC8_CONUS/HUC8_US.shp")
 
 points_sf <- gn_temp_train  %>%
@@ -40,50 +84,89 @@ few.lake.watershed <- temp %>% group_by(HUC8) %>% count() %>% filter(n < 6)
 
 gillnets <- merge(x = gn_temp_train, y = temp, all.x = T, by = "lake_id") %>%
   dplyr::filter(!HUC8 %in%few.lake.watershed$HUC8)
+rm(huc_8); rm(idtable); rm(temp)
 ```
 
 
+# Summarize variables to three years and do it without huc8
 ```{r}
 abundance.model <- brms::brm(count ~ 
                                s(year) + s(julian_day) + 
-                               s(log_acres) + s(max_depth) +
-                               s(gdd_wtr_0c) + s(peak_temp) + s(mean_surf_JulAugSep) +
-                               s(three_year_secchi) +
-                               #s(gdd_wtr_0c.previous) + s(peak_temp.previous) + s(mean_surf_JulAugSep.previous) +
-                               #s(gdd_wtr_0c.2.previous) + s(peak_temp.2.previous) + s(mean_surf_JulAugSep.2.previous) +
-                               offset(total_effort_1.1) + (1|lake_id) + (1|HUC8), 
+                               s(log_acres_s, k = 3) + s(max_depth_s, k = 3) +
+                               s(three_year_gdd_s) + 
+                               s(three_year_peaktemp_s) + 
+                               s(three_year_julsep_surf_s) +
+                               s(three_year_warmrate) +
+                               s(three_year_secchi) + 
+                               s(AREASQKM, k = 3) + s(x,y) +
+                               offset(log(total_effort_1.1)) + 
+                               (1|lake_id) + (1|HUC8), 
                              control = list(adapt_delta = 0.9),
-                             data = gillnets, family = negbinomial(),
+                             data = gn_temp_train, family = negbinomial(),
                              chains = 3, iter = 10000, warmup = 2000)
-#
-write_rds(abundance.model, "./models/huc8_abundance.rds")
+#write_rds(abundance.model, "./models/huc8_abundance.rds")
 #abundance.model <- readRDS( "./models/huc8_abundance.rds")
 summary(abundance.model)
-conditional_effects(abundance.model, effects = "three_year_secchi")
+conditional_effects(abundance.model)
 
+abundance.model.nowatershed <- brms::brm(count ~ 
+                               s(year_s) + s(julian_day_s) + 
+                               s(log_acres_s) + s(max_depth_s) +
+                               s(three_year_gdd_s) + 
+                               s(three_year_peaktemp_s) + 
+                               s(three_year_julsep_surf_s) +
+                               s(three_year_warmrate_s) +
+                               s(three_year_secchi_s) +  
+                               s(x, y) +
+                               offset(log(total_effort_1.1)) + (1|lake_id) , 
+                             control = list(adapt_delta = 0.95),
+                             data = gn_temp_train, family = negbinomial(),
+                             chains = 3, iter = 10000, warmup = 1500)
+
+#write_rds(abundance.model.nowatershed, "./models/abundance_no_watershed.rds")
+#
+abundance.model <- readRDS( "./models/abundance_no_watershed.rds")
+summary(abundance.model)
+
+# Plot Secchi effect
+secchi <- conditional_effects(abundance.model, effects = "three_year_secchi")
+plot(secchi, plot = FALSE)[[1]] +
+  scale_color_grey() +
+  scale_fill_grey() + 
+  xlab("Secchi Depth (m)")
+ggsave("./figures/gillnet_secchi.jpeg")
+
+# Plot Size effect
+acres <- conditional_effects(abundance.model, effects = "log_acres") 
+plot(acres, plot = FALSE)[[1]] +
+  scale_color_grey() +
+  scale_fill_grey() + 
+  xlab("Log Lake Area (acres)")
+ggsave("./figures/gillnet_lakesize.jpeg")
 ```
 
-
+# Diagnostics
 ```{r}
 pp_check(abundance.model)
 plot(abundance.model)
 pp_check(abundance.model, type='stat', stat='mean')
 pp_check(abundance.model, type='error_scatter_avg')
 
-fitted_values <- fitted(abundance.model)
+fitted_values <- fitted(abundance.model.nowatershed)
 head(fitted_values)
 
 ## plot expected predictions against actual response
-dat <- as.data.frame(cbind(Y = standata(abundance.model)$Y, fitted_values))
-ggplot(dat) + geom_point(aes(x = log(Estimate), y = Y)) 
+dat <- as.data.frame(cbind(Y = standata(abundance.model.nowatershed)$Y, fitted_values))
+ggplot(dat) + geom_point(aes(x = Estimate, y = Y)) + geom_abline()
 
 
-mean(fitted_values[,1] > standata(abundance.model)$Y) # bayes p-value
+mean(fitted_values[,1] > standata(abundance.model.nowatershed)$Y) # bayes p-value
 
 bayes_R2(abundance.model)
 ```
 
-# Bright spots
+
+# Identify Bright spots based on HUC8
 ```{r}
 merge_tbl <- gillnets %>% group_by(lake_id) %>% 
   distinct(lake_id, .keep_all = T) %>% select(lake_id, HUC8, x, y)
@@ -156,15 +239,16 @@ bs.geo <- merge(bs, merge_tbl, by = "lake_id")
 ```
 
 
-
+# Visualize Bright spots HUC8
 ```{r}
-summarized = gillnets %>% group_by(lake_id, lake_name.1) %>% summarize(mean.gn = mean(cpue))
+summarized = gillnets %>% group_by(lake_id, lake_name.1) %>% 
+  summarize(mean.gn = mean(cpue))
 
 
-bs.geo <- bs.geo %>% mutate(size = ifelse(brightspot == "Average", T, F)) %>% 
+bs.geo <- bs.geo %>% mutate(size = ifelse(brightspot == "Spot", T, F)) %>% 
   merge(summarized, by = "lake_id")
 
-group.colors <- c(`Dark Spot` = "black", `Average` = "blue", `Bright Spot` = "red")
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
 group.size <- c(`small` = 1, `large` = 2)
 
 bs.geo %>% ggplot() +
@@ -178,11 +262,11 @@ bs.geo %>% ggplot() +
        subtitle = "",
        x = "Gill net CPUE", y = "Deviation from expected", 
        color = "Spots")
-
+#ggsave("./figures/deviation.jpeg")
 
 mn_counties <- map_data("state", "Minnesota")
 
-group.colors <- c(`Dark Spot` = "black", `Average` = "blue", `Bright Spot` = "red")
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
 group.size <- c(`small` = 1, `large` = 2)
 
 ggplot() + 
@@ -207,5 +291,458 @@ ggplot() +
        #subtitle = "1356 Lakes, 564 Bright Spots, 50 Dark spots",
        x = "Longitude", y = "Latitude", color = "Spots") 
 #ggsave("./figures/gillnet_brightspots.jpeg")
+
+```
+
+
+# Identify bright spots based on lake
+```{r}
+merge_tbl <- gn_temp_train %>% group_by(lake_id) %>% 
+  distinct(lake_id, .keep_all = T) %>% select(lake_id, x, y)
+
+lake.effects = ranef(abundance.model)$lake_id
+lake.effects <- as.data.frame(lake.effects)
+
+lake.re <- abundance.model %>%
+  spread_draws(r_lake_id[lake_id,]) %>% ggdist::median_hdci(.width = 0.8)
+
+bs <- lake.re %>%
+  mutate(brightspot = ifelse(.lower > 0, "Bright Spot", "Spot"),
+         brightspot = ifelse(.upper < 0, "Dark Spot", brightspot))
+
+bs.geo <- merge(bs, merge_tbl, by = "lake_id") 
+
+sum(bs.geo$brightspot=="Bright Spot")
+sum(bs.geo$brightspot=="Dark Spot")
+```
+
+
+
+# Visualize Bright spots Lake RE
+```{r}
+summarized = gn_temp_train %>% group_by(lake_id, lake_name.1) %>% 
+  summarize(mean.gn = mean(cpue))
+
+
+bs.geo.plot <- bs.geo %>% 
+  mutate(size = ifelse(brightspot == "Spot", T, F),
+         shape = ifelse(brightspot == "Spot", 2, 0),
+         shape = ifelse(brightspot == "Bright Spot", 1, shape), 
+         shape = ifelse(brightspot == "Dark Spot", 3, shape)) %>% 
+  merge(summarized, by = "lake_id")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "grey", `Bright Spot` = "yellow")
+group.size <- c(`small` = 1, `large` = 2)
+group.shape <- c(`Dark Spot` = 1, `Spot` = 2, `Bright Spot` = 3)
+
+bs.geo.plot %>% ggplot() +
+  geom_point(aes(
+    y = r_lake_id, x = mean.gn, 
+    color = brightspot, alpha = size, size = size)) +
+  scale_color_manual(values = group.colors) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  labs(title = "Gill net",
+       subtitle = "",
+       x = "Gill net CPUE", y = "Deviation from expected", 
+       color = "Spots") +
+  theme_bw()
+#ggsave("./figures/deviation.jpeg")
+
+mn_counties <- map_data("state", "Minnesota")
+
+group.colors <- c(`Dark Spot` = "black", `Spot` = "blue", `Bright Spot` = "red")
+group.size <- c(`small` = 1, `large` = 2)
+
+ggplot() + 
+  geom_polygon(data = mn_counties, aes(x = long, y = lat, group = group), 
+               colour="black", fill="NA", lwd=1 )  + 
+  coord_fixed(1.3) +
+  geom_point(data = bs.geo.plot, 
+             aes(x=x, y=y, fill = brightspot, shape = brightspot,
+                 alpha = size, size = size), color = "black") + 
+  scale_shape_manual(values = c(21, 22, 23)) + 
+  #scale_colour_manual(values = c("yellow", "black", "white")) + 
+  scale_fill_manual(values = c("yellow", "black", "white")) +
+  scale_alpha_discrete(range = c(1, .25), guide = 'none') +
+  scale_size_discrete(range = c(2, 1), guide = 'none') +
+  # fill changes lake colors
+  theme(plot.title = element_text(hjust = 0.5, size = 18),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "",
+       #subtitle = "1356 Lakes, 564 Bright Spots, 50 Dark spots",
+       x = "Longitude", y = "Latitude", shape = "Spots", fill = "Spots") 
+#ggsave("./figures/gillnet_brightspots.jpeg", height = 7, width = 7)
+
+```
+
+
+# Cross- Validation Bright spots
+```{r}
+
+dev <- predict(abundance.model, newdata = gn_temp_train, 
+               re_formula = NA)
+deviance <- gn_temp_train$count - dev[,1]
+
+
+boot_dev <- function(dat){
+  dat_boot <- dat[sample(1:nrow(dat), size=nrow(dat), replace=TRUE),]
+  mod_full <- suppressWarnings(brms::brm(count ~ 
+                               s(year_s) + s(julian_day_s) + 
+                               s(log_acres_s) + s(max_depth_s) +
+                               s(three_year_gdd_s) + 
+                               s(three_year_peaktemp_s) + 
+                               s(three_year_julsep_surf_s) +
+                               s(three_year_warmrate_s) +
+                               s(three_year_secchi_s) +  
+                               s(x, y) +
+                               offset(log(total_effort_1.1)) + (1|lake_id) , 
+                             control = list(adapt_delta = 0.95),
+                             data = dat_boot, family = negbinomial(),
+                             chains = 3, iter = 5000, warmup = 100))
+  dev <- gn_temp_train$count - 
+    predict(mod_full, newdata = gn_temp_train, re_formula = NA)
+  return(dev)
+}
+
+x <- detectCores()
+registerDoParallel(x-1)
+
+n_boot <- 5
+boot_preds <- foreach(i = 1:n_boot, .combine=cbind) %dopar% {
+  pred <- try(boot_dev(gn_temp_train), silent = T)          
+  while(class(pred)=="try-error")    
+    pred <- try(boot_dev(gn_temp_train), silent = T)          
+  pred
+}
+boot_preds <- as.matrix(boot_preds)
+```
+
+
+
+
+# Model actionable factors
+```{r}
+library(nnet)
+library(ggeffects)
+actionable <- gn_temp_train %>% 
+  select(lake_id, year, contains("pa"), contains("stock"), BACI) %>%
+  mutate(zm  = ifelse(BACI %in% c(1,3,4), 0, 1),
+         zm = as.factor(zm))
+gillnet_actionable.noland <- merge(x = bs.geo, y = actionable, 
+                            all.x = T,
+                            by = c("lake_id"))
+
+gillnet_actionable <- merge(gillnet_actionable.noland, shoreline, by = "lake_id") %>% 
+  mutate(brightspot = factor(brightspot, levels = c("Spot","Bright Spot", "Dark Spot")))
+
+
+actionable.model <- multinom(brightspot ~ zm + 
+                                fry.pa.previous + fry.pa.2.previous +
+                                fgl.pa.previous + fgl.pa.2.previous +
+                               developed + crop +wet +forest, 
+                             data = gillnet_actionable)
+
+
+
+gillnet_actionable %>% ggplot() +
+  geom_boxplot(aes(y = developed, x = as.factor(year), color = brightspot))
+
+summary(actionable.model)
+
+
+ggeffect(actionable.model) %>% plot()
+
+```
+
+# ZM graphs 
+```{r}
+# Plot ZM effect
+pprob_stock <- ggeffect(actionable.model, terms = "zm") %>% dplyr::filter(response.level == "Bright.Spot")
+ggplot(data = pprob_stock ,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Zebra Mussel Presence",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+ggsave("./figures/actionable_zm_gillnet.jpeg", width = 7, height = 7)
+```
+
+
+# Stocking graphs
+```{r}
+# Plot Stocking effect Fry -1
+pprob_stock <- ggeffect(actionable.model, terms = "fry.pa.previous") %>% dplyr::filter(response.level == "Bright.Spot")
+stocking.previous = ggplot(data = pprob_stock ,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Fry Stocking/Acre 1 year",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  )+ ylim(c(0,1))
+
+# Plot Stocking effect Fry -2
+pprob_stock.2 <- ggeffect(actionable.model, terms = "fry.pa.2.previous") %>% dplyr::filter(response.level == "Bright.Spot")
+stocking.2.previous = ggplot(data = pprob_stock.2 ,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Fry Stocking/Acre 2 years",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  )+ ylim(c(0,1))
+
+# Plot Stocking effect - FGL -1
+pprob_stock.fgl <- ggeffect(actionable.model, terms = "fgl.pa.previous") %>% dplyr::filter(response.level == "Bright.Spot")
+stocking.fgl = ggplot(data = pprob_stock.fgl ,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Fingerling Stocking/Acre 1 year",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  )+ ylim(c(0,1))
+
+pprob_stock.2.fgl <- ggeffect(actionable.model, terms = "fgl.pa.2.previous") %>% dplyr::filter(response.level == "Bright.Spot")
+stocking.2.fgl = ggplot(data = pprob_stock.2.fgl ,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "Fingerling Stocking/Acre 2 years",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  )+ ylim(c(0,1))
+
+plot_grid(stocking.previous, stocking.2.previous, stocking.fgl, stocking.2.fgl, labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2)
+ggsave("./figures/actionable_stocking_gillnet.jpeg", height = 7, width = 7)
+
+stocking.previous
+ggsave("./figures/actionable_frypa_gillnet.jpeg", height = 7, width = 7)
+```
+
+
+
+# Land use effect
+```{r }
+# Plot Stocking effect
+pprob_wet <- ggeffect(actionable.model, terms = "wet") %>% dplyr::filter(response.level == "Bright.Spot")
+wet <- ggplot(data = pprob_wet,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Wetland in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+
+# Plot Stocking effect
+pprob_forest <- ggeffect(actionable.model, terms = "forest") %>% dplyr::filter(response.level == "Bright.Spot")
+forest <- ggplot(data = pprob_forest,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Forest in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+# Plot Stocking effect- Crop
+pprob_crop <- ggeffect(actionable.model, terms = "crop") %>% dplyr::filter(response.level == "Bright.Spot")
+crop <- ggplot(data = pprob_crop,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Crop in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+# Plot Stocking effect- Developed
+pprob_developed <- ggeffect(actionable.model, terms = "developed") %>% dplyr::filter(response.level == "Bright.Spot")
+developed <- ggplot(data = pprob_developed,
+       aes(x = x, y = predicted,
+           color = response.level, group = response.level)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high,
+                    color = response.level,
+                    group = response.level),
+                width = .05) +
+  scale_color_brewer(palette = "Dark2",
+                     name = "",
+                     labels = c("Bright Spot",
+                                "Dark Spot",
+                                "Spot")) +
+  labs(
+    x = "% Developed in 100m Buffer",
+    y = "Probability of \nBright Spot") +
+  # Set the theme
+  theme_minimal() +
+  theme(
+    legend.position = "none", # move legend to the bottom
+    axis.title = element_text(size = 14) # increase axis title size
+  ) + ylim(c(0,1))
+
+
+plot_grid(wet, forest, crop, developed, labels = c("A", "B", "C", "D"), ncol = 2, nrow = 2)
+ggsave("./figures/actionable_land_gillnet.jpeg", height = 7, width = 7)
+```
+
+
+
+
+
+# MN AFS 2024
+```{r}
+library(gt)
+
+# Examples (not including mille lacs)
+notmille <- bs.geo %>% 
+  dplyr::filter(lake_id %in% c("1020900", "18009302", "77002400", "1002700", 
+                               "1008700", "1009300", "18013600", "18014500")) %>% 
+  select(lake_name.1, brightspot, mean_lake, mean.gn) %>%
+  arrange(desc(mean.gn)) %>%
+  rename('Lake Name' = lake_name.1, Spot = brightspot, 
+         'Lake RE' = mean_lake, "Mean Gill Net\n CPUE" = mean.gn) %>%
+  gt::gt() %>% fmt_number(decimals = 1)
+notmille |> gtsave("./figures/notmille.png")
+
+millelacs <- bs.geo %>% dplyr::filter(huc8 == "07010207") %>% 
+  select(lake_name.1, brightspot, mean_lake, mean.gn) %>%
+  arrange(desc(mean.gn)) %>%
+  rename('Lake Name' = lake_name.1, Spot = brightspot, 
+         'Lake RE' = mean_lake, "Mean Gill Net\n CPUE" = mean.gn) %>%
+  gt::gt() %>% fmt_number(decimals = 1)
+
+millelacs |> gtsave("./figures/Mille_Lacs.png")
 ```
 
