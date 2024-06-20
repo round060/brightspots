@@ -110,13 +110,4 @@ write.csv(all_mn_wae_stocking, "./data/mn_wae_stocking.csv", row.names = F)
 ```
 
 
-```{r}
-
-```
-
-
-```{r pressure}
-
-```
-
 

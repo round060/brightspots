@@ -1,0 +1,144 @@
+---
+title: "Recruitment_ice"
+author: "Chris R"
+date: "4/17/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(sf)
+library(mgcv)
+library(arrow)
+library(gratia)
+
+
+surveys_ef <- read.csv("./data/yoy_catch_data.csv")
+mn_data <- open_dataset("./data/mn_file_arrow/") 
+ice_off <- read.csv("./data/ice_off_summarized.csv")
+
+long_term <- ice_off %>% group_by(DOW) %>% count() %>% filter(n >= 100) #%>% filter(DOW == "77021500")
+
+# Calulate average ice off long term
+average <- ice_off %>% dplyr::filter(DOW %in% long_term$DOW) %>% 
+  filter(year < 1980) %>%
+  group_by(DOW) %>% summarise(mean_ice_off = mean(min_ice_off_julian))
+
+anomaly <- average %>% merge(ice_off, by = "DOW") %>% filter(year > 1980) %>%
+  mutate(anomaly =  min_ice_off_julian - mean_ice_off) %>%
+  group_by(year) %>%
+  summarize(average_anomaly = mean(anomaly), 
+            sd_anomaly = sd(anomaly))
+```
+
+
+
+# Wae recruitment ICE
+## Uses non lake specific ice off anomalys (only year specific)
+```{r}
+plot(y = anomaly$average_anomaly, x = anomaly$year)
+mean(anomaly$average_anomaly)
+
+marta <- read.csv("./data/Barta_et_al_LOL_Phenology_Data.csv") %>%
+  mutate(iceoffmodel_jday = lubridate::yday(Model_IceOffDate),
+         iceoffobserved = lubridate::yday(LIAG_IceOffDate))
+
+efish_wae_ice <- surveys_ef %>%
+  dplyr::select(year, lake_id, catch, total_effort_1.1, x, y, log_acres) %>%
+  rename(DOW = lake_id) %>%
+  mutate(
+    acres = exp(log_acres),
+    cpue = catch/total_effort_1.1)
+  
+  
+efish_ice_anomaly <- merge(efish_wae_ice, anomaly, by = c("year")) %>%
+  mutate(DOW = as.factor(DOW),
+         year_f = as.factor(year),
+         average_anomaly_abs = abs(average_anomaly))
+
+five.years <- efish_ice_anomaly %>% group_by(DOW) %>% count() %>% dplyr::filter(n >= 5)
+efish_ice_10 <- efish_ice_anomaly %>% dplyr::filter(DOW %in% five.years$DOW)
+
+
+efish_ice_10 %>% 
+  ggplot(aes(y = sqrt(cpue), x = average_anomaly)) +
+  geom_point() +
+  geom_smooth(aes(y = sqrt(cpue), x = average_anomaly), method = "gam") #+ 
+  ylim(c(0,100))
+
+
+gam.ice <- gam(catch ~ s(average_anomaly) + acres + s(x,y) + s(DOW, bs = "re") + 
+                 s(year_f, bs = "re") + offset(log(total_effort_1.1)), 
+               method = "REML",
+               family = nb(),
+               data = efish_ice_anomaly)
+gratia::draw(gam.ice)
+summary(gam.ice)
+
+k.check(gam.ice)
+
+
+sm <- smooth_estimates(gam.ice)
+jd_smooth <- sm %>%
+  filter(smooth == "s(average_anomaly)" ) %>%
+  add_confint() %>%
+  add_constant(coef(gam.ice)["(Intercept)"]) %>% 
+  mutate(upper_ci = upper_ci + coef(gam.ice)["(Intercept)"],
+         lower_ci = lower_ci + coef(gam.ice)["(Intercept)"]) %>%
+  transform_fun(inv_link(gam.ice))
+  
+
+efish_ice_residuals <- efish_ice_anomaly %>% add_partial_residuals(gam.ice) %>%
+  add_constant(coef(gam.ice)["(Intercept)"], column = 14) %>%
+  transform_fun(inv_link(gam.ice), 14)
+
+jd_smooth %>%
+  ggplot(aes(x = average_anomaly, y = est)) +
+  geom_point(aes(x = average_anomaly, y = `s(average_anomaly)`), 
+             alpha = 0.2, data = efish_ice_residuals) +
+  geom_line(lwd = 1.5) +
+  geom_ribbon(aes(ymin = lower_ci , ymax = upper_ci), alpha = 0.2) + 
+  labs(y = "Fall Age-0 Walleye Catch", x = "Ice-Off Anomaly") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 55)) + 
+  #ggtitle("Effects of Anomalous Ice-Off on Walleye Recruitment") + 
+  theme_classic() +
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 18),
+        plot.title = element_text(size = 23, hjust = 0.5, face = "bold"))
+  
+#
+ggsave("./figures_ice_recruitment/yoy_recruitment_anomaly.jpeg", height = 10, width = 12)
+```
+
+
+
+
+# Walleye growth
+```{r}
+yoy_wae_growth <- 
+  mn_data %>% filter(species.1 %in% c("walleye")) %>%
+  filter(young_of_year %in% c("Y")) %>%
+  collect() %>%
+  filter(!is.na(length.1)) %>%
+  filter(sampling_method_abbrev %in% c("EF", "EW", "GN", "SE", "SEF", "TR")) %>%
+  mutate(date_clean = lubridate::as_date(date_clean),
+         jd = yday(date_clean),
+         year = year(date_clean))
+
+yoy_wae_growth %>%
+  ggplot(aes(y = length.1, x = year)) +
+  geom_point()
+
+# Positive values = early ice off
+yoy_wae_ice_growth <- yoy_wae_growth %>% merge(anomaly, by = "year") %>% 
+  dplyr::select(year, lake_name.1, lake_id, nhdhr.id, sampling_method, 
+                total_effort_1.1, length.1, weight.1, jd, average_anomaly, sd_anomaly)
+
+
+model <- bam(length.1 ~ s(jd) + s(average_anomaly) + s(lake_id, bs = "re") + s(year, bs = "re"), 
+             data = yoy_wae_ice_growth)
+summary(model)
+draw(model)
+
+```
+
